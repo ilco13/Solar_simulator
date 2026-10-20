@@ -151,7 +151,8 @@ describe('simulation annuelle', () => {
 });
 
 describe('toit dessiné (absent du LiDAR)', async () => {
-  const { virtualPlane, azimuthFromGutter, planeZ } = await import('../src/roof');
+  const { virtualPlane, azimuthFromEdge, guessGutter, planeZ } = await import('../src/roof');
+  const azimuthFromGutter = (r: [number, number][], no: number) => azimuthFromEdge(r, guessGutter(r), no);
   const dtm = { x0: 0, y0: 100, res: 0.5, w: 200, h: 200, data: new Float32Array(200 * 200).fill(250) };
   it('la gouttière (1er côté) donne l\'azimut, pente vers l\'extérieur', () => {
     // gouttière au sud (y = 40), pan qui monte vers le nord
@@ -165,5 +166,36 @@ describe('toit dessiné (absent du LiDAR)', async () => {
     const p = virtualPlane(ring, 30, 180, 3, 0, dtm);
     expect(planeZ(p, 45, 40)).toBeCloseTo(253, 6);
     expect(planeZ(p, 45, 45)).toBeCloseTo(253 + 5 * Math.tan(Math.PI / 6), 6);
+  });
+});
+
+describe('toit 4 pans (trapèze)', async () => {
+  const { guessGutter, azimuthFromEdge, virtualPlane } = await import('../src/roof');
+  const { layoutPan, DEFAULT_LAYOUT } = await import('../src/layout');
+  // trapèze : gouttière au sud (12 m), faîtage au nord (6 m), dessiné en commençant par un arêtier
+  const ring: [number, number][] = [[0, 0], [3, 4], [9, 4], [12, 0]];
+  const dtm = { x0: -10, y0: 20, res: 0.5, w: 80, h: 80, data: new Float32Array(6400).fill(100) };
+  it('la gouttière est le plus long des côtés parallèles', () => {
+    expect(guessGutter(ring)).toBe(3); // [12,0] -> [0,0]
+    expect(azimuthFromEdge(ring, 3, 0)).toBeCloseTo(180, 6);
+  });
+  it('les rangées de panneaux sont parallèles à la gouttière', () => {
+    const plane = virtualPlane(ring, 30, 180, 3, 0, dtm);
+    const pan = { id: 'p', name: 'p', ring, plane, obstacles: [], enabled: true, eaveHeight: 3, gutter: 3 };
+    const panels = layoutPan(pan, 0, 1.722, 1.134, DEFAULT_LAYOUT);
+    expect(panels.length).toBeGreaterThan(4);
+    for (const p of panels) {
+      const [a, b] = p.corners;
+      expect(Math.abs(a[1] - b[1])).toBeLessThan(1e-6); // côté "u" horizontal, parallèle à y = 0
+    }
+  });
+  it('pan LiDAR dont l\'azimut mesuré dévie de 4° : rangées calées sur la gouttière', () => {
+    const plane = virtualPlane(ring, 30, 184, 3, 0, dtm);
+    const pan = { id: 'p', name: 'p', ring, plane, obstacles: [], enabled: true };
+    const panels = layoutPan(pan, 0, 1.722, 1.134, DEFAULT_LAYOUT);
+    for (const p of panels) {
+      const [a, b] = p.corners;
+      expect(Math.abs(a[1] - b[1])).toBeLessThan(1e-6);
+    }
   });
 });

@@ -4,7 +4,7 @@ import L from 'leaflet';
 import { type XY, compass, distToRing, gridNorthOffset, pointInPolygon, ringArea, ringCentroid, toL93, toWGS } from './geo';
 import type { Grid } from './grid';
 import { type Building, ORTHO_URL, fetchBuildings, fetchElevation, geocode } from './ign';
-import { type RoofPan, azimuthFromGutter, detectObstacles, detectPans, panArea, planeAzimuth, planeFrom, planeFromDsm, planeTilt, planeZ, virtualPlane } from './roof';
+import { type RoofPan, azimuthFromEdge, detectObstacles, edgeForAzimuth, guessGutter, gutterEdge, detectPans, panArea, planeAzimuth, planeFrom, planeFromDsm, planeTilt, planeZ, virtualPlane } from './roof';
 import { type Tree, detectTrees } from './trees';
 import { type Scene, sceneMaxZ } from './shading';
 import { type LayoutOptions, type PlacedPanel, DEFAULT_LAYOUT, fromPlane, layoutPan, panFrame, toPlane } from './layout';
@@ -21,7 +21,7 @@ import type { WorkerRequest } from './sim.worker';
 // ======================================================================
 
 interface Project {
-  version: 1;
+  version: number;
   building: { id: string; ring: XY[] } | null;
   pans: RoofPan[] | null;
   deciduousTrees: string[];
@@ -47,7 +47,7 @@ const PAN_COLORS = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008
 
 function defaultProject(): Project {
   return {
-    version: 1,
+    version: 2,
     building: null,
     pans: null,
     deciduousTrees: [],
@@ -348,6 +348,16 @@ async function analyze(building: { id: string; ring: XY[] }, savedPans: RoofPan[
   // Toit absent du LiDAR (survol IGN antérieur à la construction) ?
   st.project.lidarMissing = forceManual || roofHeight(building.ring) < 1.5;
   st.pans = savedPans ?? (st.project.lidarMissing ? [] : detectPans(dsm, dtm, building.ring));
+  if ((st.project.version ?? 1) < 2) {
+    // v1 : la gouttière était toujours le 1er côté dessiné -> on la redétecte (côtés parallèles)
+    for (const pan of st.pans)
+      if (pan.eaveHeight !== undefined) {
+        pan.gutter = guessGutter(pan.ring);
+        pan.manualAzimuth = azimuthFromEdge(pan.ring, pan.gutter, st.northOffset);
+        pan.plane = virtualPlane(pan.ring, pan.manualTilt ?? st.lastTilt, pan.manualAzimuth, pan.eaveHeight, st.northOffset, dtm);
+      }
+    st.project.version = 2;
+  }
   st.selectedPan = null;
   renderLidarNotice();
   if (!st.pans.length && !st.project.lidarMissing) status('Aucun pan détecté : dessinez-les avec « ＋ Pan ».', true);
@@ -408,7 +418,7 @@ function renderLidarNotice(): void {
     el.className = 'weather-warn';
     $('pan-list').before(el);
   }
-  el.innerHTML = `<b>Maison absente du LiDAR IGN</b> (survol antérieur à la construction). Dessinez chaque pan avec <b>« ＋ Pan »</b> sur la photo, <b>en commençant par les 2 coins de la gouttière</b> (bas de pente). Réglez ensuite la pente et la hauteur de gouttière : le toit est ajouté au modèle 3D pour les ombres.
+  el.innerHTML = `<b>Maison absente du LiDAR IGN</b> (survol antérieur à la construction). Dessinez chaque pan avec <b>« ＋ Pan »</b> sur la photo. La <b>gouttière</b> (trait épais) est déduite des côtés parallèles, ou du 1er côté dessiné ; les panneaux s'alignent dessus. Réglez ensuite la pente et la hauteur de gouttière : le toit est ajouté au modèle 3D pour les ombres.
     Des voisins construits récemment ? Ajoutez-les avec <b>« ＋ Volume »</b>. Un arbre abattu depuis ? <b>Clic droit</b> sur son icône.`;
 }
 
@@ -659,6 +669,12 @@ function renderPans(): void {
     ).addTo(layers.pans);
     const info = panInfo(pan);
     poly.bindTooltip(`<b>${pan.name}</b><br>${info.label}, pente ${fmt(info.tilt)}°<br>${fmt(info.area, 1)} m²`, { sticky: true });
+    const ge = gutterEdge(pan);
+    if (ge !== null) {
+      const a = pan.ring[ge];
+      const b = pan.ring[(ge + 1) % pan.ring.length];
+      L.polyline([ll(a[0], a[1]), ll(b[0], b[1])], { color: col, weight: sel ? 7 : 5, opacity: 0.9, interactive: false }).addTo(layers.pans);
+    }
     poly.on('click', (e) => {
       if (st.mode === 'addpan' || st.mode === 'addobs' || st.mode === 'addvol') {
         map.fire('click', e);
@@ -731,7 +747,7 @@ function renderPanDetail(): void {
     <div class="small">${virt ? 'Pan dessiné (absent du LiDAR) : pente, azimut et hauteur saisis.' : pan.manualTilt !== undefined || pan.manualAzimuth !== undefined ? 'Pente/azimut saisis à la main.' : 'Pente et azimut mesurés sur le LiDAR.'}
       ${pan.obstacles.length} obstacle(s).</div>
     <div class="row wrap">
-      ${virt ? '' : '<button id="pd-refit">↻ Recalculer depuis le LiDAR</button><button id="pd-obs">↻ Obstacles</button>'}
+      ${virt ? '<button id="pd-gutter" title="La gouttière (trait épais) fixe le sens de la pente et l\'alignement des panneaux">↻ Changer de gouttière</button>' : '<button id="pd-refit">↻ Recalculer depuis le LiDAR</button><button id="pd-obs">↻ Obstacles</button>'}
       <button id="pd-del">🗑 Supprimer</button>
     </div></div>`;
   $('pd-name').onchange = (e) => {
@@ -749,6 +765,7 @@ function renderPanDetail(): void {
     pan.manualTilt = tilt;
     pan.manualAzimuth = az;
     if (virt) {
+      pan.gutter = edgeForAzimuth(pan.ring, az, st.northOffset);
       pan.eaveHeight = Number(($('pd-eave') as HTMLInputElement).value);
       st.lastTilt = tilt;
       st.lastEave = pan.eaveHeight;
@@ -759,6 +776,13 @@ function renderPanDetail(): void {
   $('pd-tilt').onchange = manual;
   $('pd-az').onchange = manual;
   if (virt) $('pd-eave').onchange = manual;
+  if (virt)
+    $('pd-gutter').onclick = () => {
+      pan.gutter = ((pan.gutter ?? 0) + 1) % pan.ring.length;
+      pan.manualAzimuth = azimuthFromEdge(pan.ring, pan.gutter, st.northOffset);
+      pan.plane = virtualPlane(pan.ring, pan.manualTilt ?? st.lastTilt, pan.manualAzimuth, pan.eaveHeight!, st.northOffset, st.dtm!);
+      onPansChanged();
+    };
   if (!virt) $('pd-refit').onclick = () => {
     const p = planeFromDsm(st.dsm!, pan.ring);
     if (p) pan.plane = p;
@@ -806,7 +830,7 @@ function setMode(m: typeof st.mode): void {
     st.mode === 'vertices'
       ? 'Sélectionnez un pan, puis <b>glissez ses sommets</b>. Point gris = ajouter un sommet. <b>Clic droit</b> sur un sommet = le supprimer. Les sommets s\'aimantent à ceux des pans voisins. Cliquez un obstacle rouge pour le supprimer.'
       : st.mode === 'addpan'
-        ? `Cliquez les coins du pan sur la carte${st.project.lidarMissing ? ', <b>en commençant par les 2 coins de la gouttière</b> (bas de pente)' : ''}. <b>Cliquez sur le premier point</b> pour fermer (Échap pour annuler).`
+        ? `Cliquez les coins du pan sur la carte${st.project.lidarMissing ? ' (de préférence en commençant par les 2 coins de la gouttière)' : ''}. <b>Cliquez sur le premier point</b> pour fermer (Échap pour annuler).`
         : st.mode === 'addvol'
         ? 'Volume (maison voisine récente, mur, abri…) : cliquez ses coins, fermez sur le premier point, puis indiquez sa hauteur.'
         : st.mode === 'addobs'
@@ -913,6 +937,9 @@ function livePolygon(pan: RoofPan): void {
 
 function refitPan(pan: RoofPan): void {
   if (pan.eaveHeight !== undefined) {
+    // la gouttière suit le côté le plus proche de l'ancienne orientation, et la pente lui reste perpendiculaire
+    pan.gutter = edgeForAzimuth(pan.ring, pan.manualAzimuth ?? 180, st.northOffset);
+    pan.manualAzimuth = azimuthFromEdge(pan.ring, pan.gutter, st.northOffset);
     pan.plane = virtualPlane(pan.ring, pan.manualTilt ?? st.lastTilt, pan.manualAzimuth ?? 180, pan.eaveHeight, st.northOffset, st.dtm!);
     return;
   }
@@ -973,7 +1000,8 @@ function closeDraft(): void {
     // Toit absent du LiDAR : la gouttière est le 1er côté dessiné
     pan.eaveHeight = st.lastEave;
     pan.manualTilt = st.lastTilt;
-    pan.manualAzimuth = Math.round(azimuthFromGutter(ring, st.northOffset));
+    pan.gutter = guessGutter(ring);
+    pan.manualAzimuth = azimuthFromEdge(ring, pan.gutter, st.northOffset);
     pan.plane = virtualPlane(ring, pan.manualTilt, pan.manualAzimuth, pan.eaveHeight, st.northOffset, st.dtm!);
   } else {
     pan.plane = planeFromDsm(st.dsm!, ring) ?? planeFrom(30, 180, st.northOffset, cx, cy, st.dsm!.data[0]);

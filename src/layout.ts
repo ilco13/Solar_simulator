@@ -1,5 +1,5 @@
 import { type XY, type XYZ, DEG, distToRing, pointInPolygon } from './geo';
-import { type RoofPan, planeZ } from './roof';
+import { type RoofPan, gutterEdge, planeZ } from './roof';
 
 export type Orientation = 'auto' | 'portrait' | 'paysage';
 
@@ -48,7 +48,26 @@ export function panFrame(pan: RoofPan, northOffset: number): PanFrame {
   } else {
     upx = a / g;
     upy = b / g;
+    // Rangées parallèles à la gouttière (et au faîtage), pas aux arêtiers :
+    // on cale l'axe u exactement sur le côté de gouttière.
+    const e = gutterEdge(pan);
+    if (e !== null) {
+      const p = pan.ring[e];
+      const q = pan.ring[(e + 1) % pan.ring.length];
+      const len = Math.hypot(q[0] - p[0], q[1] - p[1]);
+      if (len > 0) {
+        let nx = -(q[1] - p[1]) / len;
+        let ny = (q[0] - p[0]) / len;
+        if (nx * a + ny * b < 0) {
+          nx = -nx;
+          ny = -ny;
+        }
+        upx = nx;
+        upy = ny;
+      }
+    }
   }
+  const slopeUp = a * upx + b * upy; // pente le long de l'axe v
   const xs = pan.ring.map((p) => p[0]);
   const ys = pan.ring.map((p) => p[1]);
   return {
@@ -58,7 +77,7 @@ export function panFrame(pan: RoofPan, northOffset: number): PanFrame {
     uy: -upx,
     upx,
     upy,
-    cosT: 1 / Math.sqrt(1 + g * g),
+    cosT: 1 / Math.sqrt(1 + slopeUp * slopeUp),
     tilt: Math.atan(g) / DEG,
   };
 }

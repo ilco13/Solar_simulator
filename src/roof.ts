@@ -22,6 +22,8 @@ export interface RoofPan {
    * hauteur de la gouttière au-dessus du sol (m). Le plan vient alors de pente + azimut + hauteur.
    */
   eaveHeight?: number;
+  /** Côté de gouttière (ring[gutter] → ring[gutter+1]) : les rangées de panneaux lui sont parallèles. */
+  gutter?: number;
 }
 
 export function planeZ(p: Plane, x: number, y: number): number {
@@ -70,9 +72,10 @@ export function virtualPlane(ring: XY[], tiltDeg: number, azTrueDeg: number, eav
   return planeFrom(tiltDeg, azTrueDeg, northOffset, low[0], low[1], ground + eaveHeight);
 }
 
-/** Azimut vrai de la pente quand on dessine la gouttière en premier (côté A→B), pente vers l'extérieur. */
-export function azimuthFromGutter(ring: XY[], northOffset: number): number {
-  const [a, b] = ring;
+/** Azimut vrai de la pente si le côté i (ring[i] → ring[i+1]) est la gouttière : pente vers l'extérieur. */
+export function azimuthFromEdge(ring: XY[], i: number, northOffset: number): number {
+  const a = ring[i % ring.length];
+  const b = ring[(i + 1) % ring.length];
   let nx = b[1] - a[1];
   let ny = -(b[0] - a[0]);
   const [cx, cy] = ringCentroid(ring);
@@ -84,6 +87,73 @@ export function azimuthFromGutter(ring: XY[], northOffset: number): number {
   }
   const gridAz = Math.atan2(nx, ny) / DEG;
   return (((gridAz - northOffset) % 360) + 360) % 360;
+}
+
+function edgeDir(ring: XY[], i: number): { dx: number; dy: number; len: number } {
+  const a = ring[i];
+  const b = ring[(i + 1) % ring.length];
+  const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+  return { dx: (b[0] - a[0]) / (len || 1), dy: (b[1] - a[1]) / (len || 1), len };
+}
+
+/**
+ * Gouttière probable d'un pan dessiné à la main :
+ * - si le 1er côté dessiné a un côté parallèle (rectangle, trapèze) : c'est lui ;
+ * - sinon, le plus long des côtés parallèles (trapèze d'un toit 4 pans : gouttière > faîtage) ;
+ * - sinon (triangle d'une croupe) : le plus long côté.
+ */
+export function guessGutter(ring: XY[]): number {
+  const n = ring.length;
+  const e = ring.map((_, i) => edgeDir(ring, i));
+  const parallel = (i: number, j: number) => Math.abs(e[i].dx * e[j].dy - e[i].dy * e[j].dx) < Math.sin(6 * DEG);
+  const inPair = (i: number) => e.some((_, j) => j !== i && Math.abs(i - j) !== 1 && Math.abs(i - j) !== n - 1 && parallel(i, j));
+  if (inPair(0)) return 0;
+  let best = -1;
+  for (let i = 0; i < n; i++) if (inPair(i) && (best < 0 || e[i].len > e[best].len)) best = i;
+  if (best >= 0) return best;
+  for (let i = 0; i < n; i++) if (best < 0 || e[i].len > e[best].len) best = i;
+  return best;
+}
+
+/** Côté dont la pente extérieure est la plus proche d'un azimut (pour suivre la gouttière quand on modifie le contour). */
+export function edgeForAzimuth(ring: XY[], azTrue: number, northOffset: number): number {
+  let best = 0;
+  let bd = Infinity;
+  for (let i = 0; i < ring.length; i++) {
+    let d = Math.abs(azimuthFromEdge(ring, i, northOffset) - azTrue) % 360;
+    if (d > 180) d = 360 - d;
+    // à écart égal, on préfère le côté le plus long
+    const score = d - 0.01 * edgeDir(ring, i).len;
+    if (score < bd) {
+      bd = score;
+      best = i;
+    }
+  }
+  return best;
+}
+
+/**
+ * Côté de gouttière d'un pan : celui choisi (pan.gutter), sinon le côté le plus long
+ * presque horizontal (à moins de 15° des courbes de niveau du plan), le plus bas possible.
+ * null pour un toit plat.
+ */
+export function gutterEdge(pan: RoofPan): number | null {
+  const { a, b } = pan.plane;
+  const g = Math.hypot(a, b);
+  if (g < Math.tan(2 * DEG)) return null;
+  if (pan.gutter !== undefined && pan.gutter < pan.ring.length) return pan.gutter;
+  const ring = pan.ring;
+  const cands: { i: number; len: number; z: number }[] = [];
+  for (let i = 0; i < ring.length; i++) {
+    const e = edgeDir(ring, i);
+    if (Math.abs((a * e.dx + b * e.dy) / g) > Math.sin(15 * DEG)) continue;
+    const q = ring[(i + 1) % ring.length];
+    cands.push({ i, len: e.len, z: (planeZ(pan.plane, ring[i][0], ring[i][1]) + planeZ(pan.plane, q[0], q[1])) / 2 });
+  }
+  if (!cands.length) return null;
+  const maxLen = Math.max(...cands.map((c) => c.len));
+  const good = cands.filter((c) => c.len >= 0.5 * maxLen).sort((p, q) => p.z - q.z);
+  return good[0].i;
 }
 
 /** Surface réelle (inclinée) du pan, m². */

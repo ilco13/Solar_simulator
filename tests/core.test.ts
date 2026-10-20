@@ -149,3 +149,21 @@ describe('simulation annuelle', () => {
     expect(sum(r.eCentral)).toBeGreaterThan(0);
   });
 });
+
+describe('toit dessiné (absent du LiDAR)', async () => {
+  const { virtualPlane, azimuthFromGutter, planeZ } = await import('../src/roof');
+  const dtm = { x0: 0, y0: 100, res: 0.5, w: 200, h: 200, data: new Float32Array(200 * 200).fill(250) };
+  it('la gouttière (1er côté) donne l\'azimut, pente vers l\'extérieur', () => {
+    // gouttière au sud (y = 40), pan qui monte vers le nord
+    const ring: [number, number][] = [[40, 40], [50, 40], [50, 45], [40, 45]];
+    expect(azimuthFromGutter(ring, 0)).toBeCloseTo(180, 6);
+    // gouttière à l'ouest
+    expect(azimuthFromGutter([[40, 45], [40, 40], [45, 40], [45, 45]], 0)).toBeCloseTo(270, 6);
+  });
+  it('gouttière à la bonne hauteur, faîtage plus haut', () => {
+    const ring: [number, number][] = [[40, 40], [50, 40], [50, 45], [40, 45]];
+    const p = virtualPlane(ring, 30, 180, 3, 0, dtm);
+    expect(planeZ(p, 45, 40)).toBeCloseTo(253, 6);
+    expect(planeZ(p, 45, 45)).toBeCloseTo(253 + 5 * Math.tan(Math.PI / 6), 6);
+  });
+});

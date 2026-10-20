@@ -1,4 +1,4 @@
-import { type Grid, cellX, cellY, colOf, rowOf } from './grid';
+import { type Grid, cellX, cellY, colOf, rowOf, sampleNearest } from './grid';
 import { type XY, DEG, distToRing, pointInPolygon, ringArea, ringCentroid, simplifyRing } from './geo';
 
 /** Plan de toit : z = a·x + b·y + c (coordonnées Lambert-93). */
@@ -17,6 +17,11 @@ export interface RoofPan {
   enabled: boolean; // pan utilisé pour poser des panneaux
   manualTilt?: number;
   manualAzimuth?: number;
+  /**
+   * Pan dessiné à la main, absent du LiDAR (maison construite après le survol IGN) :
+   * hauteur de la gouttière au-dessus du sol (m). Le plan vient alors de pente + azimut + hauteur.
+   */
+  eaveHeight?: number;
 }
 
 export function planeZ(p: Plane, x: number, y: number): number {
@@ -41,6 +46,44 @@ export function planeFrom(tiltDeg: number, azTrueDeg: number, northOffset: numbe
   const a = -s * Math.sin(g);
   const b = -s * Math.cos(g);
   return { a, b, c: z - a * x - b * y };
+}
+
+/**
+ * Plan d'un pan dessiné (absent du LiDAR) : pente + azimut saisis, et la gouttière
+ * (point le plus bas du contour) à `eaveHeight` au-dessus du sol (MNT).
+ */
+export function virtualPlane(ring: XY[], tiltDeg: number, azTrueDeg: number, eaveHeight: number, northOffset: number, dtm: Grid): Plane {
+  const p0 = planeFrom(tiltDeg, azTrueDeg, northOffset, 0, 0, 0);
+  // sommet le plus bas selon la pente
+  let low = ring[0];
+  for (const q of ring) if (planeZ(p0, q[0], q[1]) < planeZ(p0, low[0], low[1])) low = q;
+  let ground = 0;
+  let n = 0;
+  for (const q of ring) {
+    const v = sampleNearest(dtm, q[0], q[1]);
+    if (Number.isFinite(v)) {
+      ground += v;
+      n++;
+    }
+  }
+  ground = n ? ground / n : 0;
+  return planeFrom(tiltDeg, azTrueDeg, northOffset, low[0], low[1], ground + eaveHeight);
+}
+
+/** Azimut vrai de la pente quand on dessine la gouttière en premier (côté A→B), pente vers l'extérieur. */
+export function azimuthFromGutter(ring: XY[], northOffset: number): number {
+  const [a, b] = ring;
+  let nx = b[1] - a[1];
+  let ny = -(b[0] - a[0]);
+  const [cx, cy] = ringCentroid(ring);
+  const mx = (a[0] + b[0]) / 2;
+  const my = (a[1] + b[1]) / 2;
+  if (nx * (mx - cx) + ny * (my - cy) < 0) {
+    nx = -nx;
+    ny = -ny;
+  }
+  const gridAz = Math.atan2(nx, ny) / DEG;
+  return (((gridAz - northOffset) % 360) + 360) % 360;
 }
 
 /** Surface réelle (inclinée) du pan, m². */

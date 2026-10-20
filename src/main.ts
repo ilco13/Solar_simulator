@@ -4,7 +4,7 @@ import L from 'leaflet';
 import { type XY, compass, distToRing, gridNorthOffset, pointInPolygon, ringArea, ringCentroid, toL93, toWGS } from './geo';
 import type { Grid } from './grid';
 import { type Building, ORTHO_URL, fetchBuildings, fetchElevation, geocode } from './ign';
-import { type RoofPan, detectObstacles, detectPans, panArea, planeAzimuth, planeFrom, planeFromDsm, planeTilt, planeZ } from './roof';
+import { type RoofPan, azimuthFromGutter, detectObstacles, detectPans, panArea, planeAzimuth, planeFrom, planeFromDsm, planeTilt, planeZ, virtualPlane } from './roof';
 import { type Tree, detectTrees } from './trees';
 import { type Scene, sceneMaxZ } from './shading';
 import { type LayoutOptions, type PlacedPanel, DEFAULT_LAYOUT, fromPlane, layoutPan, panFrame, toPlane } from './layout';
@@ -32,6 +32,9 @@ interface Project {
   layout: LayoutOptions;
   elec: ElecSettings;
   disabledPanels: string[];
+  removedTrees: string[]; // arbres abattus depuis le survol LiDAR
+  volumes: { ring: XY[]; height: number }[]; // constructions récentes absentes du LiDAR
+  lidarMissing?: boolean; // maison construite après le survol LiDAR : pans dessinés
   view?: { lat: number; lon: number; zoom: number };
 }
 
@@ -55,6 +58,8 @@ function defaultProject(): Project {
     layout: { ...DEFAULT_LAYOUT },
     elec: { ...DEFAULT_ELEC },
     disabledPanels: [],
+    removedTrees: [],
+    volumes: [],
   };
 }
 
@@ -72,6 +77,9 @@ const st = {
   project: loadProject(),
   pickMode: true,
   dsm: null as Grid | null,
+  dsmBase: null as Float32Array | null, // MNS d'origine (avant ajout du toit dessiné, des volumes…)
+  lastTilt: 17,
+  lastEave: 2.8,
   dtm: null as Grid | null,
   buildings: [] as Building[],
   trees: [] as Tree[],
@@ -86,7 +94,7 @@ const st = {
   resultPanels: [] as string[], // id des panneaux, dans l'ordre du résultat
   resultPans: [] as string[],
   selectedPan: null as string | null,
-  mode: 'none' as 'none' | 'vertices' | 'addpan' | 'addobs',
+  mode: 'none' as 'none' | 'vertices' | 'addpan' | 'addobs' | 'addvol',
   draft: [] as XY[],
   hoverPanel: null as string | null,
 };
@@ -273,12 +281,18 @@ async function onPick(lat: number, lon: number): Promise<void> {
       const near = bats.map((q) => ({ q, d: distToRing(x, y, q.ring) })).sort((p, q) => p.d - q.d)[0];
       if (near && near.d < 6) b = near.q;
     }
-    if (!b) {
-      status('Aucun bâtiment cadastré à cet endroit. Cliquez au milieu du toit.', true);
-      return;
-    }
     st.project.pans = null;
     st.project.disabledPanels = [];
+    if (!b) {
+      setBusy(null);
+      if (!confirm('Aucun bâtiment cadastré ici (construction récente ?).\n\nDessiner la maison à la main à cet endroit ?')) {
+        status('Cliquez au milieu du toit de votre maison.', true);
+        return;
+      }
+      const h = 8;
+      await analyze({ id: 'dessin', ring: [[x - h, y - h], [x + h, y - h], [x + h, y + h], [x - h, y + h]] }, null, true);
+      return;
+    }
     await analyze({ id: b.id, ring: b.ring });
   } catch (e) {
     status(`Erreur : ${(e as Error).message}`, true);
@@ -293,7 +307,7 @@ map.on('click', (e: L.LeafletMouseEvent) => {
     return;
   }
   const p = toL93(e.latlng.lat, e.latlng.lng);
-  if (st.mode === 'addpan') addDraftPoint(p);
+  if (st.mode === 'addpan' || st.mode === 'addvol') addDraftPoint(p);
   else if (st.mode === 'addobs') addObstaclePoint(p);
 });
 
@@ -301,7 +315,7 @@ map.on('click', (e: L.LeafletMouseEvent) => {
 // Analyse : LiDAR, bâtiments, arbres, pans, météo
 // ======================================================================
 
-async function analyze(building: { id: string; ring: XY[] }, savedPans: RoofPan[] | null = null): Promise<void> {
+async function analyze(building: { id: string; ring: XY[] }, savedPans: RoofPan[] | null = null, forceManual = false): Promise<void> {
   const [cx, cy] = ringCentroid(building.ring);
   [st.lat, st.lon] = toWGS(cx, cy);
   st.northOffset = gridNorthOffset(st.lat, st.lon);
@@ -316,6 +330,7 @@ async function analyze(building: { id: string; ring: XY[] }, savedPans: RoofPan[
     fetchBuildings(cx, cy, DATA_HALF),
   ]);
   st.dsm = dsm;
+  st.dsmBase = dsm.data.slice();
   st.dtm = dtm;
   st.buildings = bats;
   st.project.building = building;
@@ -330,9 +345,13 @@ async function analyze(building: { id: string; ring: XY[] }, savedPans: RoofPan[
 
   setBusy('Détection des pans de toit…');
   await tick();
-  st.pans = savedPans ?? detectPans(dsm, dtm, building.ring);
+  // Toit absent du LiDAR (survol IGN antérieur à la construction) ?
+  st.project.lidarMissing = forceManual || roofHeight(building.ring) < 1.5;
+  st.pans = savedPans ?? (st.project.lidarMissing ? [] : detectPans(dsm, dtm, building.ring));
   st.selectedPan = null;
-  if (!st.pans.length) status('Aucun pan détecté : dessinez-les avec « ＋ Pan ».', true);
+  renderLidarNotice();
+  if (!st.pans.length && !st.project.lidarMissing) status('Aucun pan détecté : dessinez-les avec « ＋ Pan ».', true);
+  rebuildDsm();
 
   setBusy('Données d\'ensoleillement PVGIS…');
   const w = await weatherP;
@@ -350,7 +369,7 @@ async function analyze(building: { id: string; ring: XY[] }, savedPans: RoofPan[
     startPick();
   };
   layers.pick.clearLayers();
-  L.polygon(building.ring.map((p) => ll(p[0], p[1])), { color: '#fff', weight: 1, dashArray: '4 4', fill: false, interactive: false }).addTo(layers.pick);
+  if (building.id !== 'dessin') L.polygon(building.ring.map((p) => ll(p[0], p[1])), { color: '#fff', weight: 1, dashArray: '4 4', fill: false, interactive: false }).addTo(layers.pick);
   const bounds = L.latLngBounds(building.ring.map((p) => ll(p[0], p[1])));
   map.fitBounds(bounds.pad(0.6), { maxZoom: 21 });
   renderTrees();
@@ -361,6 +380,80 @@ async function analyze(building: { id: string; ring: XY[] }, savedPans: RoofPan[
 }
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
+
+/** Hauteur médiane (MNS − MNT) dans une emprise : ~0 si la maison n'existait pas lors du survol LiDAR. */
+function roofHeight(ring: XY[]): number {
+  const g = st.dsm!;
+  const vals: number[] = [];
+  for (let j = 0; j < g.h; j++)
+    for (let i = 0; i < g.w; i++) {
+      const x = g.x0 + (i + 0.5) * g.res;
+      const y = g.y0 - (j + 0.5) * g.res;
+      if (pointInPolygon(x, y, ring)) vals.push(st.dsmBase![j * g.w + i] - st.dtm!.data[j * g.w + i]);
+    }
+  if (!vals.length) return 0;
+  vals.sort((a, b) => a - b);
+  return vals[Math.floor(vals.length / 2)];
+}
+
+function renderLidarNotice(): void {
+  let el = document.getElementById('lidar-notice');
+  if (!st.project.lidarMissing) {
+    el?.remove();
+    return;
+  }
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'lidar-notice';
+    el.className = 'weather-warn';
+    $('pan-list').before(el);
+  }
+  el.innerHTML = `<b>Maison absente du LiDAR IGN</b> (survol antérieur à la construction). Dessinez chaque pan avec <b>« ＋ Pan »</b> sur la photo, <b>en commençant par les 2 coins de la gouttière</b> (bas de pente). Réglez ensuite la pente et la hauteur de gouttière : le toit est ajouté au modèle 3D pour les ombres.
+    Des voisins construits récemment ? Ajoutez-les avec <b>« ＋ Volume »</b>. Un arbre abattu depuis ? <b>Clic droit</b> sur son icône.`;
+}
+
+/**
+ * MNS utilisé pour les ombres = MNS LiDAR + toits dessinés + volumes ajoutés − arbres abattus.
+ */
+function rebuildDsm(): void {
+  const g = st.dsm;
+  const base = st.dsmBase;
+  const dtm = st.dtm?.data;
+  if (!g || !base || !dtm) return;
+  const d = base.slice();
+  const removed = new Set(st.project.removedTrees);
+  if (removed.size && st.treeLabel) {
+    const ids = new Set(st.trees.filter((t) => removed.has(t.key)).map((t) => t.id));
+    for (let k = 0; k < d.length; k++) if (ids.has(st.treeLabel[k])) d[k] = dtm[k];
+  }
+  const burn = (ring: XY[], z: (k: number, x: number, y: number) => number) => {
+    const xs = ring.map((p) => p[0]);
+    const ys = ring.map((p) => p[1]);
+    const i0 = Math.max(0, Math.floor((Math.min(...xs) - g.x0) / g.res));
+    const i1 = Math.min(g.w - 1, Math.floor((Math.max(...xs) - g.x0) / g.res));
+    const j0 = Math.max(0, Math.floor((g.y0 - Math.max(...ys)) / g.res));
+    const j1 = Math.min(g.h - 1, Math.floor((g.y0 - Math.min(...ys)) / g.res));
+    for (let j = j0; j <= j1; j++)
+      for (let i = i0; i <= i1; i++) {
+        const x = g.x0 + (i + 0.5) * g.res;
+        const y = g.y0 - (j + 0.5) * g.res;
+        if (!pointInPolygon(x, y, ring)) continue;
+        const k = j * g.w + i;
+        d[k] = Math.max(d[k], z(k, x, y));
+      }
+  };
+  for (const v of st.project.volumes) burn(v.ring, (k) => dtm[k] + v.height);
+  for (const pan of st.pans) if (pan.eaveHeight !== undefined) burn(pan.ring, (_k, x, y) => planeZ(pan.plane, x, y));
+  g.data = d;
+}
+
+/** Après un changement du modèle 3D : workers, relief, ombres. */
+function onSceneChanged(): void {
+  rebuildDsm();
+  pushScene();
+  if (reliefOverlay && map.hasLayer(reliefOverlay)) drawRelief();
+  requestShadow();
+}
 
 // ---------- Météo ----------
 
@@ -567,7 +660,7 @@ function renderPans(): void {
     const info = panInfo(pan);
     poly.bindTooltip(`<b>${pan.name}</b><br>${info.label}, pente ${fmt(info.tilt)}°<br>${fmt(info.area, 1)} m²`, { sticky: true });
     poly.on('click', (e) => {
-      if (st.mode === 'addpan' || st.mode === 'addobs') {
+      if (st.mode === 'addpan' || st.mode === 'addobs' || st.mode === 'addvol') {
         map.fire('click', e);
         return;
       }
@@ -583,6 +676,19 @@ function renderPans(): void {
       });
     }
   }
+  st.project.volumes.forEach((v) => {
+    const r = L.polygon(v.ring.map((p) => ll(p[0], p[1])), { color: '#888', weight: 1.5, fillColor: '#888', fillOpacity: 0.35, bubblingMouseEvents: false }).addTo(layers.pans);
+    r.bindTooltip(`Volume ajouté : ${fmt(v.height, 1)} m${st.mode === 'none' ? '' : ' (cliquer pour supprimer)'}`);
+    r.on('click', () => {
+      if (st.mode === 'none') return;
+      if (!confirm('Supprimer ce volume ?')) return;
+      st.project.volumes = st.project.volumes.filter((q) => q !== v);
+      onSceneChanged();
+      renderPans();
+      scheduleSim();
+      save();
+    });
+  });
   renderPanList();
   renderVertexHandles();
 }
@@ -613,18 +719,19 @@ function renderPanDetail(): void {
     return;
   }
   const info = panInfo(pan);
+  const virt = pan.eaveHeight !== undefined;
   el.innerHTML = `<div class="box">
     <div class="grid2">
       <label class="field">Nom<input id="pd-name" value="${pan.name.replace(/"/g, '&quot;')}" /></label>
       <label class="field">Utiliser ce pan<select id="pd-en"><option value="1">Oui</option><option value="0"${pan.enabled ? '' : ' selected'}>Non</option></select></label>
       <label class="field">Pente (°)<input id="pd-tilt" type="number" min="0" max="70" step="0.5" value="${info.tilt.toFixed(1)}" /></label>
       <label class="field">Azimut (° depuis le nord)<input id="pd-az" type="number" min="0" max="359" step="1" value="${info.az.toFixed(0)}" /></label>
+      ${virt ? `<label class="field">Hauteur de gouttière (m)<input id="pd-eave" type="number" min="0" max="30" step="0.1" value="${pan.eaveHeight!.toFixed(1)}" /></label>` : ''}
     </div>
-    <div class="small">${pan.manualTilt !== undefined || pan.manualAzimuth !== undefined ? 'Pente/azimut saisis à la main.' : 'Pente et azimut mesurés sur le LiDAR.'}
+    <div class="small">${virt ? 'Pan dessiné (absent du LiDAR) : pente, azimut et hauteur saisis.' : pan.manualTilt !== undefined || pan.manualAzimuth !== undefined ? 'Pente/azimut saisis à la main.' : 'Pente et azimut mesurés sur le LiDAR.'}
       ${pan.obstacles.length} obstacle(s).</div>
     <div class="row wrap">
-      <button id="pd-refit">↻ Recalculer depuis le LiDAR</button>
-      <button id="pd-obs">↻ Obstacles</button>
+      ${virt ? '' : '<button id="pd-refit">↻ Recalculer depuis le LiDAR</button><button id="pd-obs">↻ Obstacles</button>'}
       <button id="pd-del">🗑 Supprimer</button>
     </div></div>`;
   $('pd-name').onchange = (e) => {
@@ -639,21 +746,27 @@ function renderPanDetail(): void {
     const tilt = Number(($('pd-tilt') as HTMLInputElement).value);
     const az = Number(($('pd-az') as HTMLInputElement).value);
     const [cx, cy] = ringCentroid(pan.ring);
-    pan.plane = planeFrom(tilt, az, st.northOffset, cx, cy, planeZ(pan.plane, cx, cy));
     pan.manualTilt = tilt;
     pan.manualAzimuth = az;
+    if (virt) {
+      pan.eaveHeight = Number(($('pd-eave') as HTMLInputElement).value);
+      st.lastTilt = tilt;
+      st.lastEave = pan.eaveHeight;
+      pan.plane = virtualPlane(pan.ring, tilt, az, pan.eaveHeight, st.northOffset, st.dtm!);
+    } else pan.plane = planeFrom(tilt, az, st.northOffset, cx, cy, planeZ(pan.plane, cx, cy));
     onPansChanged();
   };
   $('pd-tilt').onchange = manual;
   $('pd-az').onchange = manual;
-  $('pd-refit').onclick = () => {
+  if (virt) $('pd-eave').onchange = manual;
+  if (!virt) $('pd-refit').onclick = () => {
     const p = planeFromDsm(st.dsm!, pan.ring);
     if (p) pan.plane = p;
     delete pan.manualTilt;
     delete pan.manualAzimuth;
     onPansChanged();
   };
-  $('pd-obs').onclick = () => {
+  if (!virt) $('pd-obs').onclick = () => {
     pan.obstacles = detectObstacles(st.dsm!, pan);
     onPansChanged();
   };
@@ -672,6 +785,7 @@ function selectPan(id: string | null): void {
 
 function onPansChanged(relayoutNeeded = true): void {
   st.project.pans = st.pans;
+  if (st.pans.some((p) => p.eaveHeight !== undefined) || st.project.lidarMissing) onSceneChanged();
   if (relayoutNeeded) relayout();
   else renderPans();
   save();
@@ -685,17 +799,20 @@ function setMode(m: typeof st.mode): void {
   $('btn-edit').classList.toggle('on', st.mode === 'vertices');
   $('btn-addpan').classList.toggle('on', st.mode === 'addpan');
   $('btn-addobs').classList.toggle('on', st.mode === 'addobs');
+  $('btn-addvol').classList.toggle('on', st.mode === 'addvol');
   const hint = $('edit-hint');
   hint.hidden = st.mode === 'none';
   hint.innerHTML =
     st.mode === 'vertices'
       ? 'Sélectionnez un pan, puis <b>glissez ses sommets</b>. Point gris = ajouter un sommet. <b>Clic droit</b> sur un sommet = le supprimer. Les sommets s\'aimantent à ceux des pans voisins. Cliquez un obstacle rouge pour le supprimer.'
       : st.mode === 'addpan'
-        ? 'Cliquez les coins du pan sur la carte. <b>Cliquez sur le premier point</b> pour fermer (Échap pour annuler).'
+        ? `Cliquez les coins du pan sur la carte${st.project.lidarMissing ? ', <b>en commençant par les 2 coins de la gouttière</b> (bas de pente)' : ''}. <b>Cliquez sur le premier point</b> pour fermer (Échap pour annuler).`
+        : st.mode === 'addvol'
+        ? 'Volume (maison voisine récente, mur, abri…) : cliquez ses coins, fermez sur le premier point, puis indiquez sa hauteur.'
         : st.mode === 'addobs'
           ? 'Sélectionnez le pan, puis cliquez <b>2 coins opposés</b> de l\'obstacle (cheminée, velux…).'
           : '';
-  map.getContainer().style.cursor = st.mode === 'addpan' || st.mode === 'addobs' ? 'crosshair' : '';
+  map.getContainer().style.cursor = st.mode === 'addpan' || st.mode === 'addobs' || st.mode === 'addvol' ? 'crosshair' : '';
   if (st.mode === 'vertices' && !st.selectedPan && st.pans[0]) st.selectedPan = st.pans[0].id;
   renderPans();
   renderDraft();
@@ -703,6 +820,7 @@ function setMode(m: typeof st.mode): void {
 
 $('btn-edit').onclick = () => setMode('vertices');
 $('btn-addpan').onclick = () => setMode('addpan');
+$('btn-addvol').onclick = () => setMode('addvol');
 $('btn-addobs').onclick = () => {
   if (!st.selectedPan && st.pans[0]) st.selectedPan = st.pans[0].id;
   setMode('addobs');
@@ -751,7 +869,8 @@ function renderVertexHandles(): void {
       refitPan(pan);
       onPansChanged();
     });
-    m.on('contextmenu', () => {
+    m.on('contextmenu', (e) => {
+      e.originalEvent.preventDefault();
       if (pan.ring.length <= 3) return;
       pan.ring.splice(k, 1);
       refitPan(pan);
@@ -793,6 +912,10 @@ function livePolygon(pan: RoofPan): void {
 }
 
 function refitPan(pan: RoofPan): void {
+  if (pan.eaveHeight !== undefined) {
+    pan.plane = virtualPlane(pan.ring, pan.manualTilt ?? st.lastTilt, pan.manualAzimuth ?? 180, pan.eaveHeight, st.northOffset, st.dtm!);
+    return;
+  }
   if (pan.manualTilt !== undefined) return;
   const p = planeFromDsm(st.dsm!, pan.ring);
   if (p) pan.plane = p;
@@ -805,7 +928,7 @@ function renderDraft(): void {
     livePoly.remove();
     livePoly = null;
   }
-  if (st.mode !== 'addpan' || !st.draft.length) {
+  if ((st.mode !== 'addpan' && st.mode !== 'addvol') || !st.draft.length) {
     if (st.mode !== 'vertices') layers.edit.clearLayers();
     return;
   }
@@ -829,16 +952,38 @@ function addDraftPoint(p: XY): void {
 function closeDraft(): void {
   if (st.draft.length < 3) return;
   const ring = st.draft.slice();
+  if (st.mode === 'addvol') {
+    const h = Number(prompt('Hauteur de ce volume au-dessus du sol (m) ?', '6')?.replace(',', '.'));
+    if (h > 0) {
+      st.project.volumes.push({ ring, height: h });
+      onSceneChanged();
+      scheduleSim();
+      save();
+    }
+    st.draft = [];
+    renderDraft();
+    renderPans();
+    return;
+  }
   const [cx, cy] = ringCentroid(ring);
-  const plane = planeFromDsm(st.dsm!, ring) ?? planeFrom(30, 180, st.northOffset, cx, cy, st.dsm!.data[0]);
   let n = st.pans.length + 1;
   while (st.pans.some((p) => p.id === `pan${n}`)) n++;
-  const pan: RoofPan = { id: `pan${n}`, name: `Pan ${n}`, ring, plane, obstacles: [], enabled: true };
-  pan.obstacles = detectObstacles(st.dsm!, pan);
+  const pan: RoofPan = { id: `pan${n}`, name: `Pan ${n}`, ring, plane: { a: 0, b: 0, c: 0 }, obstacles: [], enabled: true };
+  if (st.project.lidarMissing || roofHeight(ring) < 1.5) {
+    // Toit absent du LiDAR : la gouttière est le 1er côté dessiné
+    pan.eaveHeight = st.lastEave;
+    pan.manualTilt = st.lastTilt;
+    pan.manualAzimuth = Math.round(azimuthFromGutter(ring, st.northOffset));
+    pan.plane = virtualPlane(ring, pan.manualTilt, pan.manualAzimuth, pan.eaveHeight, st.northOffset, st.dtm!);
+  } else {
+    pan.plane = planeFromDsm(st.dsm!, ring) ?? planeFrom(30, 180, st.northOffset, cx, cy, st.dsm!.data[0]);
+    pan.obstacles = detectObstacles(st.dsm!, pan);
+  }
   st.pans.push(pan);
   st.selectedPan = pan.id;
-  setMode('addpan');
+  st.draft = []; // on reste en mode dessin pour enchaîner les pans
   onPansChanged();
+  renderDraft();
 }
 
 let obsFirst: XY | null = null;
@@ -866,9 +1011,10 @@ function addObstaclePoint(p: XY): void {
 // 3. Arbres
 // ======================================================================
 
+const isRemoved = (t: Tree) => st.project.removedTrees.includes(t.key);
 const treeIcon = (t: Tree) =>
   L.divIcon({
-    className: 'tree-icon',
+    className: `tree-icon${isRemoved(t) ? ' removed' : ''}`,
     html: `<img src="./${t.deciduous ? 'tree-deciduous' : 'tree-evergreen'}.svg" alt="">`,
     iconSize: [22, 22],
     iconAnchor: [11, 11],
@@ -881,7 +1027,22 @@ function renderTrees(): void {
   const shown = st.trees.filter((t) => Math.hypot(t.x - cx, t.y - cy) < TREE_RADIUS && t.height >= 4);
   for (const t of shown) {
     const m = L.marker(ll(t.x, t.y), { icon: treeIcon(t), zIndexOffset: -100 }).addTo(layers.trees);
-    const tip = () => `Arbre ~${fmt(t.height)} m, couronne Ø ${fmt(2 * t.crownRadius)} m<br><b>${t.deciduous ? 'Caduc' : 'Persistant'}</b> (cliquer pour changer)`;
+    const tip = () =>
+      isRemoved(t)
+        ? `Arbre ~${fmt(t.height)} m <b>abattu</b> (ignoré).<br>Clic droit pour le remettre.`
+        : `Arbre ~${fmt(t.height)} m, couronne Ø ${fmt(2 * t.crownRadius)} m<br><b>${t.deciduous ? 'Caduc' : 'Persistant'}</b> (clic pour changer)<br>Clic droit : arbre abattu depuis le survol`;
+    m.on('contextmenu', (e) => {
+      e.originalEvent.preventDefault();
+      const set = new Set(st.project.removedTrees);
+      if (set.has(t.key)) set.delete(t.key);
+      else set.add(t.key);
+      st.project.removedTrees = [...set];
+      m.setIcon(treeIcon(t));
+      m.setTooltipContent(tip());
+      onSceneChanged();
+      scheduleSim();
+      save();
+    });
     m.bindTooltip(tip());
     m.on('click', () => {
       t.deciduous = !t.deciduous;

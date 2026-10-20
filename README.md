@@ -19,9 +19,19 @@ npm run dev        # puis ouvrir http://localhost:5173
 
 1. Tapez l'adresse, puis **cliquez sur le toit de la maison**.
 2. Vérifiez les pans détectés. Si besoin : **✏️ Modifier les contours** (glisser les sommets, point gris = nouveau sommet, clic droit = supprimer), **＋ Pan** pour dessiner un pan, **＋ Obstacle** pour une cheminée ou un velux. La pente et l'azimut d'un pan peuvent aussi être saisis à la main.
-3. Arbres : persistants par défaut ; **cliquez sur une icône** pour rendre l'arbre caduc (mois sans feuilles et transparence réglables).
+3. Arbres : persistants par défaut ; **cliquez sur une icône** pour rendre l'arbre caduc (mois sans feuilles et transparence réglables) ; **clic droit** si l'arbre a été abattu depuis le survol LiDAR.
 4. Choisissez le modèle de panneau et les micro-onduleurs.
 5. Résultats : période, valeur affichée sur les panneaux (% de soleil perdu ou kWh), tableaux par pan et par panneau, export CSV.
+
+### Maison récente, absente du LiDAR
+
+Le LiDAR HD date du survol IGN : une maison construite après n'y figure pas (ni souvent dans le cadastre BD TOPO). L'application le détecte (hauteur mesurée ≈ 0) et passe en **mode dessin** :
+
+- cliquez sur la maison et acceptez de la dessiner ;
+- **＋ Pan** : cliquez les coins de chaque pan sur la photo, **en commençant par les 2 coins de la gouttière** (bas de pente) ; l'azimut en est déduit ;
+- réglez la **pente** et la **hauteur de gouttière** dans le détail du pan ;
+- le toit dessiné est ajouté au modèle 3D (il fait de l'ombre et en reçoit) ;
+- **＋ Volume** : maisons voisines récentes, murs, abris (contour + hauteur).
 
 Le projet est enregistré dans le navigateur et peut être exporté/importé en JSON. **Aucune adresse n'est écrite dans le dépôt.**
 

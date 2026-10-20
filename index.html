@@ -31,6 +31,7 @@
             <button id="btn-edit" class="toggle" title="Déplacer les sommets des pans (glisser), ajouter un sommet (clic sur un point gris), supprimer un sommet (clic droit)">✏️ Modifier les contours</button>
             <button id="btn-addpan">＋ Pan</button>
             <button id="btn-addobs">＋ Obstacle</button>
+            <button id="btn-addvol" title="Construction absente du LiDAR (maison voisine récente, mur, abri…) : contour + hauteur">＋ Volume</button>
             <button id="btn-redetect" title="Relancer la détection automatique">↻ Détecter</button>
           </div>
           <div id="pan-detail"></div>
@@ -39,7 +40,7 @@
 
         <section id="s-trees" class="step" hidden>
           <h2><span>3</span> Arbres</h2>
-          <p class="hint">Par défaut les arbres sont <b>persistants</b> (ombre toute l'année). Cliquez sur l'icône d'un arbre pour le rendre <b>caduc</b>.</p>
+          <p class="hint">Par défaut les arbres sont <b>persistants</b> (ombre toute l'année). Cliquez sur l'icône d'un arbre pour le rendre <b>caduc</b>. Clic droit : arbre abattu depuis le survol LiDAR.</p>
           <div class="row wrap">
             <span class="tree-key"><img src="./tree-evergreen.svg" alt="" /> persistant</span>
             <span class="tree-key"><img src="./tree-deciduous.svg" alt="" /> caduc</span>

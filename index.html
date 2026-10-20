@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Simulateur solaire</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='4' fill='%23eda100'/></svg>" />
+  </head>
+  <body>
+    <div id="app">
+      <aside id="side">
+        <header>
+          <h1>Simulateur solaire</h1>
+          <p class="sub">LiDAR HD IGN · PVGIS SARAH-3 · calcul dans votre navigateur</p>
+        </header>
+
+        <section id="s-loc" class="step">
+          <h2><span>1</span> Votre maison</h2>
+          <div class="search">
+            <input id="q" type="search" placeholder="Adresse (ex. avenue…, Peynier)" autocomplete="off" />
+            <ul id="q-res" hidden></ul>
+          </div>
+          <p class="hint" id="loc-hint">Cherchez l'adresse puis <b>cliquez sur le toit de votre maison</b> sur la carte.</p>
+          <div id="loc-status" class="status" hidden></div>
+        </section>
+
+        <section id="s-roof" class="step" hidden>
+          <h2><span>2</span> Pans de toit</h2>
+          <div id="pan-list"></div>
+          <div class="row wrap">
+            <button id="btn-edit" class="toggle" title="Déplacer les sommets des pans (glisser), ajouter un sommet (clic sur un point gris), supprimer un sommet (clic droit)">✏️ Modifier les contours</button>
+            <button id="btn-addpan">＋ Pan</button>
+            <button id="btn-addobs">＋ Obstacle</button>
+            <button id="btn-redetect" title="Relancer la détection automatique">↻ Détecter</button>
+          </div>
+          <div id="pan-detail"></div>
+          <p class="hint" id="edit-hint" hidden></p>
+        </section>
+
+        <section id="s-trees" class="step" hidden>
+          <h2><span>3</span> Arbres</h2>
+          <p class="hint">Par défaut les arbres sont <b>persistants</b> (ombre toute l'année). Cliquez sur l'icône d'un arbre pour le rendre <b>caduc</b>.</p>
+          <div class="row wrap">
+            <span class="tree-key"><img src="./tree-evergreen.svg" alt="" /> persistant</span>
+            <span class="tree-key"><img src="./tree-deciduous.svg" alt="" /> caduc</span>
+          </div>
+          <div id="tree-summary" class="small"></div>
+          <details>
+            <summary>Réglages des arbres caducs</summary>
+            <div class="small">Mois sans feuilles :</div>
+            <div id="leafless" class="months"></div>
+            <label class="field">Soleil traversant un arbre sans feuilles
+              <span><input id="leaf-trans" type="range" min="0" max="90" step="5" value="50" /> <output id="leaf-trans-v">50 %</output></span>
+            </label>
+            <div class="row"><button id="tree-all-p">Tous persistants</button><button id="tree-all-c">Tous caducs</button></div>
+          </details>
+        </section>
+
+        <section id="s-panels" class="step" hidden>
+          <h2><span>4</span> Panneaux</h2>
+          <label class="field">Modèle<select id="panel-model"></select></label>
+          <div id="panel-custom" class="grid2" hidden>
+            <label class="field">Puissance (Wc)<input id="pc-wp" type="number" min="100" max="800" step="5" /></label>
+            <label class="field">Longueur (m)<input id="pc-l" type="number" min="0.5" max="3" step="0.001" /></label>
+            <label class="field">Largeur (m)<input id="pc-w" type="number" min="0.5" max="2" step="0.001" /></label>
+            <label class="field">Coef. temp. (%/°C)<input id="pc-g" type="number" min="-0.6" max="0" step="0.01" /></label>
+          </div>
+          <div id="panel-spec" class="small"></div>
+          <div class="grid2">
+            <label class="field">Orientation
+              <select id="lay-orient"><option value="auto">Auto (max. de panneaux)</option><option value="portrait">Portrait</option><option value="paysage">Paysage</option></select>
+            </label>
+            <label class="field">Marge aux bords (cm)<input id="lay-margin" type="number" min="0" max="100" step="5" value="30" /></label>
+            <label class="field">Jeu entre panneaux (cm)<input id="lay-gap" type="number" min="0" max="10" step="1" value="2" /></label>
+            <label class="field">Recul obstacles (cm)<input id="lay-obs" type="number" min="0" max="100" step="5" value="20" /></label>
+          </div>
+          <p class="hint">Cliquez sur un panneau pour l'exclure ou le réintégrer.</p>
+          <div id="panel-summary" class="kpis"></div>
+        </section>
+
+        <section id="s-elec" class="step" hidden>
+          <h2><span>5</span> Onduleurs</h2>
+          <label class="field">Micro-onduleurs<select id="micro"></select></label>
+          <div class="grid2">
+            <label class="field">Rendement onduleur central (%)<input id="central-eff" type="number" min="90" max="99.5" step="0.1" value="97.5" /></label>
+            <label class="field">Puissance AC centrale (kVA, 0 = sans limite)<input id="central-ac" type="number" min="0" max="36" step="0.5" value="0" /></label>
+            <label class="field">Pertes système (%)<input id="losses" type="number" min="0" max="20" step="0.5" value="3" /></label>
+          </div>
+          <p class="hint">Onduleur central : un MPPT par pan, tous les panneaux d'un pan en série. Un panneau ombré freine toute la chaîne (diodes bypass modélisées). Micro-onduleurs : chaque panneau est indépendant.</p>
+        </section>
+
+        <section id="s-res" class="step" hidden>
+          <h2><span>6</span> Résultats</h2>
+          <div id="weather-box"></div>
+          <div class="row wrap">
+            <label class="field inline">Période
+              <select id="period"></select>
+            </label>
+            <label class="field inline">Sur les panneaux
+              <select id="label-mode">
+                <option value="loss">% de soleil perdu</option>
+                <option value="kwh">kWh produits (micro)</option>
+                <option value="none">Rien</option>
+              </select>
+            </label>
+          </div>
+          <div id="sim-progress" class="progress" hidden><div></div></div>
+          <div id="kpis" class="kpis"></div>
+          <div id="chart"></div>
+          <h3>Par pan</h3>
+          <div id="pan-table" class="table-wrap"></div>
+          <h3>Par panneau : % de soleil perdu à cause des ombres</h3>
+          <div id="panel-table" class="table-wrap"></div>
+          <div class="row wrap">
+            <button id="btn-csv">⬇ Export CSV</button>
+            <button id="btn-save">💾 Enregistrer le projet</button>
+            <label class="button">📂 Ouvrir un projet<input id="file-project" type="file" accept=".json" hidden /></label>
+          </div>
+          <details class="method">
+            <summary>Méthode et sources</summary>
+            <ul>
+              <li><b>Toit, arbres, bâtiments</b> : LiDAR HD de l'IGN (modèle numérique de surface et de terrain, 50 cm), emprises BD TOPO.</li>
+              <li><b>Ensoleillement</b> : PVGIS 5.3 (Centre commun de recherche, Commission européenne), année météo type issue de la base satellite SARAH-3 (2005-2023), heure par heure : direct, diffus, température.</li>
+              <li><b>Relief lointain</b> : horizon PVGIS (modèle de terrain).</li>
+              <li><b>Ombres</b> : lancer de rayons vers le soleil sur le modèle 3D LiDAR, 9 points par panneau, chaque heure de l'année. Le diffus est réduit selon la part du ciel masquée.</li>
+              <li><b>Transposition</b> : modèle Hay-Davies, albédo 0,2, pertes angulaires ASHRAE, température des cellules (NOCT).</li>
+              <li><b>% de soleil perdu</b> = 1 − (rayonnement reçu avec ombres / rayonnement reçu sans aucun masque), pour la période choisie. Il inclut le relief lointain (détail au survol).</li>
+            </ul>
+          </details>
+        </section>
+      </aside>
+
+      <main>
+        <div id="map"></div>
+        <div id="layers" class="panel-float">
+          <label><input type="checkbox" id="ly-shadow" checked /> Ombres</label>
+          <label><input type="checkbox" id="ly-relief" /> Relief LiDAR</label>
+          <label><input type="checkbox" id="ly-pans" checked /> Pans</label>
+          <label><input type="checkbox" id="ly-panels" checked /> Panneaux</label>
+          <label><input type="checkbox" id="ly-trees" checked /> Arbres</label>
+        </div>
+        <div id="timebar" class="panel-float" hidden>
+          <button id="play" title="Animer la journée">▶</button>
+          <div class="sliders">
+            <label>Date <input id="day" type="range" min="1" max="365" value="172" /> <output id="day-v"></output></label>
+            <label>Heure <input id="hour" type="range" min="4" max="22" step="0.25" value="12" /> <output id="hour-v"></output></label>
+          </div>
+          <div class="presets">
+            <button data-day="355">21 déc.</button><button data-day="80">20 mars</button><button data-day="172">21 juin</button>
+          </div>
+          <div id="sun-v" class="small"></div>
+        </div>
+        <div id="busy" hidden><div class="spinner"></div><span id="busy-msg"></span></div>
+      </main>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

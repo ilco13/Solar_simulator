@@ -124,3 +124,24 @@ export function compass(azDeg: number): string {
   const names = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSO', 'SO', 'OSO', 'O', 'ONO', 'NO', 'NNO'];
   return names[Math.round((((azDeg % 360) + 360) % 360) / 22.5) % 16];
 }
+
+/** Rectangle à angles droits : côté A→B, largeur = distance signée de C à la droite AB. */
+export function rectFrom3(a: XY, b: XY, c: XY): XY[] {
+  const len = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+  const nx = -(b[1] - a[1]) / len;
+  const ny = (b[0] - a[0]) / len;
+  const w = (c[0] - a[0]) * nx + (c[1] - a[1]) * ny;
+  return [a, b, [b[0] + w * nx, b[1] + w * ny], [a[0] + w * nx, a[1] + w * ny]];
+}
+
+/** Point C contraint pour que le côté B→C soit parallèle ou perpendiculaire au côté A→B. */
+export function orthoSnap(a: XY, b: XY, c: XY): XY {
+  const len = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+  const dx = (b[0] - a[0]) / len;
+  const dy = (b[1] - a[1]) / len;
+  const vx = c[0] - b[0];
+  const vy = c[1] - b[1];
+  const along = vx * dx + vy * dy;
+  const across = -vx * dy + vy * dx;
+  return Math.abs(along) > Math.abs(across) ? [b[0] + along * dx, b[1] + along * dy] : [b[0] - across * dy, b[1] + across * dx];
+}

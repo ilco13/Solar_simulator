@@ -247,3 +247,20 @@ describe('calage photo / LiDAR', async () => {
     expect(r.confidence).toBeGreaterThan(3);
   });
 });
+
+describe('tracé rectangle', async () => {
+  const { rectFrom3, orthoSnap } = await import('../src/geo');
+  it('3 clics -> rectangle à angles droits, même si le 3e clic est de travers', () => {
+    const r = rectFrom3([0, 0], [10, 1], [3, 7]);
+    for (let i = 0; i < 4; i++) {
+      const a = r[i], b = r[(i + 1) % 4], c = r[(i + 2) % 4];
+      const dot = (b[0] - a[0]) * (c[0] - b[0]) + (b[1] - a[1]) * (c[1] - b[1]);
+      expect(Math.abs(dot)).toBeLessThan(1e-9);
+    }
+  });
+  it('Maj : côté perpendiculaire au précédent', () => {
+    const c = orthoSnap([0, 0], [10, 0], [10.4, 5]);
+    expect(c[0]).toBeCloseTo(10, 9);
+    expect(c[1]).toBeCloseTo(5, 9);
+  });
+});

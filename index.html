@@ -35,6 +35,12 @@
             <button id="btn-addvol" title="Construction absente du LiDAR (maison voisine récente, mur, abri…) : contour + hauteur">＋ Volume</button>
             <button id="btn-redetect" title="Relancer la détection automatique">↻ Détecter</button>
           </div>
+          <label class="field">Tracé (toit auto, pan, volume)
+            <select id="draw-shape">
+              <option value="rect">▭ Rectangle : 3 clics, angles droits</option>
+              <option value="free">✎ Polygone libre (Maj = angle droit)</option>
+            </select>
+          </label>
           <div id="pan-detail"></div>
           <p class="hint" id="edit-hint" hidden></p>
         </section>

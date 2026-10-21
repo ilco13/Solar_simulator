@@ -1,7 +1,7 @@
 import 'leaflet/dist/leaflet.css';
 import './style.css';
 import L from 'leaflet';
-import { type XY, compass, distToRing, gridNorthOffset, pointInPolygon, ringArea, ringCentroid, toL93, toWGS } from './geo';
+import { type XY, compass, distToRing, orthoSnap, rectFrom3, gridNorthOffset, pointInPolygon, ringArea, ringCentroid, toL93, toWGS } from './geo';
 import type { Grid } from './grid';
 import { type Building, ORTHO_URL, fetchBuildings, fetchElevation, fetchLidarDate, fetchOrthoDate, fetchOrthoGray, geocode } from './ign';
 import { findOffset, lidarEdges } from './calage';
@@ -36,7 +36,8 @@ interface Project {
   removedTrees: string[]; // arbres abattus depuis le survol LiDAR
   volumes: { ring: XY[]; height: number }[]; // constructions récentes absentes du LiDAR
   lidarMissing?: boolean; // maison construite après le survol LiDAR : pans dessinés
-  photoOffset?: { dx: number; dy: number }; // décalage de la photo aérienne pour la caler sur le LiDAR (m, est/nord)
+  photoOffset?: { dx: number; dy: number };
+  drawShape?: 'rect' | 'free'; // tracé des pans / volumes / toits : rectangle 3 clics ou polygone libre // décalage de la photo aérienne pour la caler sur le LiDAR (m, est/nord)
   view?: { lat: number; lon: number; zoom: number };
 }
 
@@ -313,7 +314,7 @@ map.on('click', (e: L.LeafletMouseEvent) => {
     return;
   }
   const p = toL93(e.latlng.lat, e.latlng.lng);
-  if (st.mode === 'addpan' || st.mode === 'addvol' || st.mode === 'addroof') addDraftPoint(p);
+  if (st.mode === 'addpan' || st.mode === 'addvol' || st.mode === 'addroof') addDraftPoint(p, e.originalEvent.shiftKey);
   else if (st.mode === 'addobs') addObstaclePoint(p);
 });
 
@@ -620,7 +621,7 @@ function renderLidarNotice(): void {
     el.className = 'weather-warn';
     $('pan-list').before(el);
   }
-  el.innerHTML = `<b>Maison absente du LiDAR IGN</b> (survol antérieur à la construction). Le plus simple : <b>« 🏠 Toit auto »</b>, puis cliquez les 4 coins du toit (2 pans, 4 pans ou monopente). Sinon, dessinez chaque pan avec <b>« ＋ Pan »</b>. La <b>gouttière</b> (trait épais) est déduite des côtés parallèles, ou du 1er côté dessiné ; les panneaux s'alignent dessus. Réglez ensuite la pente et la hauteur de gouttière : le toit est ajouté au modèle 3D pour les ombres.
+  el.innerHTML = `<b>Maison absente du LiDAR IGN</b> (survol antérieur à la construction). Le plus simple : <b>« 🏠 Toit auto »</b> (2 pans, 4 pans ou monopente), puis tracez le rectangle du toit : 2 coins d'un côté, un 3e clic pour la largeur. Sinon, dessinez chaque pan avec <b>« ＋ Pan »</b>. La <b>gouttière</b> (trait épais) est déduite des côtés parallèles, ou du 1er côté dessiné ; les panneaux s'alignent dessus. Réglez ensuite la pente et la hauteur de gouttière : le toit est ajouté au modèle 3D pour les ombres.
     Des voisins construits récemment ? Ajoutez-les avec <b>« ＋ Volume »</b>. Un arbre abattu depuis ? <b>Clic droit</b> sur son icône.`;
 }
 
@@ -1063,6 +1064,8 @@ function onPansChanged(relayoutNeeded = true): void {
 
 function setMode(m: typeof st.mode): void {
   st.mode = st.mode === m ? 'none' : m;
+  cancelAnimationFrame(previewFrame);
+  clearPreview();
   st.draft = [];
   $('btn-edit').classList.toggle('on', st.mode === 'vertices');
   $('btn-addpan').classList.toggle('on', st.mode === 'addpan');
@@ -1075,9 +1078,11 @@ function setMode(m: typeof st.mode): void {
     st.mode === 'vertices'
       ? 'Sélectionnez un pan, puis <b>glissez ses sommets</b>. Point gris = ajouter un sommet. <b>Clic droit</b> sur un sommet = le supprimer. Les sommets s\'aimantent à ceux des pans voisins. Cliquez un obstacle rouge pour le supprimer.'
       : st.mode === 'addpan'
-        ? `Cliquez les coins du pan sur la carte${st.project.lidarMissing ? ' (de préférence en commençant par les 2 coins de la gouttière)' : ''}. <b>Cliquez sur le premier point</b> pour fermer (Échap pour annuler).`
+        ? rectMode()
+          ? 'Rectangle : cliquez <b>2 coins d\'un côté</b> (de préférence la gouttière), puis <b>un 3e clic pour la largeur</b>. Angles droits garantis.'
+          : `Cliquez les coins du pan sur la carte${st.project.lidarMissing ? ' (de préférence en commençant par les 2 coins de la gouttière)' : ''}. <b>Cliquez sur le premier point</b> pour fermer. <b>Maj</b> : côté parallèle ou perpendiculaire au précédent. Échap pour annuler.`
         : st.mode === 'addroof'
-        ? `<b>Toit automatique</b> : réglez puis cliquez les <b>4 coins du toit</b> (débords compris).
+        ? `<b>Toit automatique</b> : réglez puis ${rectMode() ? 'tracez le rectangle du toit (débords compris) : <b>2 coins d\'un côté</b>, puis <b>un 3e clic pour la largeur</b>' : 'cliquez les <b>4 coins du toit</b> (débords compris)'}.
            <span class="grid2" style="margin-top:6px">
              <label class="field">Type<select id="rg-kind">
                <option value="quatre">4 pans (croupes)</option>
@@ -1089,7 +1094,7 @@ function setMode(m: typeof st.mode): void {
              <label class="field">Gouttière / sol naturel (m)<input id="rg-eave" type="number" min="0" max="30" step="0.1" value="${st.roofGen.eave}" /></label>
            </span>`
         : st.mode === 'addvol'
-        ? 'Volume (maison voisine récente, mur, abri…) : cliquez ses coins, fermez sur le premier point, puis indiquez sa hauteur.'
+        ? `Volume (maison voisine récente, mur, abri…) : ${rectMode() ? '2 coins d\'un côté puis la largeur' : 'cliquez ses coins, fermez sur le premier point'}, puis indiquez sa hauteur.`
         : st.mode === 'addobs'
           ? 'Sélectionnez le pan, puis cliquez <b>2 coins opposés</b> de l\'obstacle (cheminée, velux…).'
           : '';
@@ -1115,6 +1120,19 @@ $('btn-edit').onclick = () => setMode('vertices');
 $('btn-addpan').onclick = () => setMode('addpan');
 $('btn-addvol').onclick = () => setMode('addvol');
 $('btn-addroof').onclick = () => setMode('addroof');
+{
+  const sel = $('draw-shape') as HTMLSelectElement;
+  sel.value = st.project.drawShape ?? 'rect';
+  sel.onchange = () => {
+    st.project.drawShape = sel.value as 'rect' | 'free';
+    save();
+    if (isDrawMode()) {
+      const m = st.mode;
+      setMode(m); // quitte
+      setMode(m); // et revient avec la bonne consigne
+    }
+  };
+}
 $('btn-addobs').onclick = () => {
   if (!st.selectedPan && st.pans[0]) st.selectedPan = st.pans[0].id;
   setMode('addobs');
@@ -1220,7 +1238,40 @@ function refitPan(pan: RoofPan): void {
 
 // ---------- Nouveau pan / obstacle ----------
 
+// ---------- Aperçu en direct du tracé ----------
+const previewLayer = L.layerGroup().addTo(map);
+let previewFrame = 0;
+function clearPreview(): void {
+  previewLayer.clearLayers();
+}
+const mFmt = (v: number) => `${fmt(v, 2)} m`;
+map.on('mousemove', (e: L.LeafletMouseEvent) => {
+  if (!isDrawMode() || !st.draft.length) return;
+  cancelAnimationFrame(previewFrame);
+  previewFrame = requestAnimationFrame(() => {
+    clearPreview();
+    // le tracé a pu se terminer entre le mouvement et l'affichage
+    if (!isDrawMode() || !st.draft.length) return;
+    let m = toL93(e.latlng.lat, e.latlng.lng);
+    const d = st.draft;
+    const style = { color: '#ffd400', weight: 2, dashArray: '6 4', interactive: false, fillOpacity: 0.15 };
+    let label = '';
+    if (rectMode() && d.length === 2) {
+      const r = rectFrom3(d[0], d[1], m);
+      L.polygon(r.map((q) => ll(q[0], q[1])), style).addTo(previewLayer);
+      label = `${mFmt(Math.hypot(d[1][0] - d[0][0], d[1][1] - d[0][1]))} × ${mFmt(Math.hypot(r[2][0] - r[1][0], r[2][1] - r[1][1]))}`;
+    } else {
+      if (!rectMode() && e.originalEvent.shiftKey && d.length >= 2) m = orthoSnap(d[d.length - 2], d[d.length - 1], m);
+      const last = d[d.length - 1];
+      L.polyline([ll(last[0], last[1]), ll(m[0], m[1])], style).addTo(previewLayer);
+      label = mFmt(Math.hypot(m[0] - last[0], m[1] - last[1]));
+    }
+    L.marker(ll(m[0], m[1]), { icon: L.divIcon({ className: 'dim-label', html: `<div>${label}</div>`, iconSize: [0, 0] }), interactive: false }).addTo(previewLayer);
+  });
+});
+
 function renderDraft(): void {
+  if (!st.draft.length) clearPreview();
   if (livePoly) {
     livePoly.remove();
     livePoly = null;
@@ -1237,7 +1288,27 @@ function renderDraft(): void {
   });
 }
 
-function addDraftPoint(p: XY): void {
+const isDrawMode = () => st.mode === 'addpan' || st.mode === 'addvol' || st.mode === 'addroof';
+const rectMode = () => (st.project.drawShape ?? 'rect') === 'rect';
+
+function addDraftPoint(p: XY, shift = false): void {
+  clearPreview();
+  if (rectMode()) {
+    // Rectangle : 2 clics pour un côté, le 3e pour la largeur (angles droits garantis)
+    st.draft.push(st.draft.length < 2 ? snap(p, null as unknown as RoofPan, -1) : p);
+    if (st.draft.length < 3) {
+      renderDraft();
+      return;
+    }
+    const rect = rectFrom3(st.draft[0], st.draft[1], st.draft[2]);
+    if (st.mode === 'addroof') generateHouseRoof(rect);
+    else {
+      st.draft = rect;
+      closeDraft();
+    }
+    return;
+  }
+  if (shift && st.draft.length >= 2) p = orthoSnap(st.draft[st.draft.length - 2], st.draft[st.draft.length - 1], p);
   if (st.mode === 'addroof') {
     st.draft.push(p);
     if (st.draft.length === 4) generateHouseRoof(st.draft.slice());

@@ -399,6 +399,32 @@ async function analyze(building: { id: string; ring: XY[] }, savedPans: RoofPan[
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
+// ---------- Pente en degrés <-> pourcentage ----------
+const degToPct = (d: number) => Math.tan((d * Math.PI) / 180) * 100;
+const pctToDeg = (p: number) => (Math.atan(p / 100) * 180) / Math.PI;
+
+/** Relie un champ « pente en ° » et un champ « pente en % » : chacun met l'autre à jour. */
+function linkSlope(degId: string, pctId: string, onCommit: () => void): void {
+  const d = $(degId) as HTMLInputElement;
+  const p = $(pctId) as HTMLInputElement;
+  const fromDeg = () => {
+    if (d.value !== '') p.value = degToPct(Number(d.value)).toFixed(1);
+  };
+  const fromPct = () => {
+    if (p.value !== '') d.value = pctToDeg(Number(p.value)).toFixed(2);
+  };
+  d.oninput = fromDeg;
+  p.oninput = fromPct;
+  d.onchange = () => {
+    fromDeg();
+    onCommit();
+  };
+  p.onchange = () => {
+    fromPct();
+    onCommit();
+  };
+}
+
 // ---------- Dates des données ----------
 
 const frDate = (iso: string) => new Date(iso + 'T12:00:00Z').toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' });
@@ -895,7 +921,7 @@ function renderPanList(): void {
     const div = document.createElement('div');
     div.className = `pan-item${pan.id === st.selectedPan ? ' sel' : ''}${pan.enabled ? '' : ' off'}`;
     div.innerHTML = `<span class="sw" style="background:${panColor(pan)}"></span>
-      <span><b>${pan.name}</b> · ${info.label} · ${fmt(info.tilt)}° · ${fmt(info.area)} m²</span>
+      <span><b>${pan.name}</b> · ${info.label} · ${fmt(info.tilt)}° (${fmt(degToPct(info.tilt))} %) · ${fmt(info.area)} m²</span>
       <span class="small">${pan.enabled ? `${counts.get(pan.id) ?? 0} pann.` : 'exclu'}</span>`;
     div.onclick = () => selectPan(pan.id);
     el.appendChild(div);
@@ -903,7 +929,22 @@ function renderPanList(): void {
   renderPanDetail();
 }
 
+let renderingDetail = false;
 function renderPanDetail(): void {
+  // Remplacer le contenu pendant qu'un de ses champs a le focus déclenche blur/change
+  // en cascade : on retire le focus d'abord et on évite la ré-entrée.
+  if (renderingDetail) return;
+  renderingDetail = true;
+  try {
+    const active = document.activeElement as HTMLElement | null;
+    if (active && $('pan-detail').contains(active)) active.blur();
+    renderPanDetailInner();
+  } finally {
+    renderingDetail = false;
+  }
+}
+
+function renderPanDetailInner(): void {
   const el = $('pan-detail');
   const pan = st.pans.find((p) => p.id === st.selectedPan);
   if (!pan) {
@@ -917,6 +958,7 @@ function renderPanDetail(): void {
       <label class="field">Nom<input id="pd-name" value="${pan.name.replace(/"/g, '&quot;')}" /></label>
       <label class="field">Utiliser ce pan<select id="pd-en"><option value="1">Oui</option><option value="0"${pan.enabled ? '' : ' selected'}>Non</option></select></label>
       <label class="field">Pente (°)<input id="pd-tilt" type="number" min="0" max="70" step="0.5" value="${info.tilt.toFixed(1)}" /></label>
+      <label class="field">Pente (%)<input id="pd-tiltpct" type="number" min="0" max="275" step="1" value="${degToPct(info.tilt).toFixed(1)}" /></label>
       <label class="field">Azimut (° depuis le nord)<input id="pd-az" type="number" min="0" max="359" step="1" value="${info.az.toFixed(0)}" /></label>
       ${virt ? `<label class="field">Hauteur de gouttière (m)<input id="pd-eave" type="number" min="0" max="30" step="0.1" value="${pan.eaveHeight!.toFixed(2)}" /></label>
       <label class="field">Hauteur de faîtage (m)<input id="pd-ridge" type="number" min="0" max="40" step="0.1" value="${(pan.eaveHeight! + panRun(pan.ring, pan.gutter ?? 0) * Math.tan((info.tilt * Math.PI) / 180)).toFixed(2)}" /></label>
@@ -959,7 +1001,7 @@ function renderPanDetail(): void {
     } else pan.plane = planeFrom(tilt, az, st.northOffset, cx, cy, planeZ(pan.plane, cx, cy));
     onPansChanged();
   };
-  $('pd-tilt').onchange = manual;
+  linkSlope('pd-tilt', 'pd-tiltpct', manual);
   $('pd-az').onchange = manual;
   if (virt) {
     $('pd-eave').onchange = manual;
@@ -974,6 +1016,7 @@ function renderPanDetail(): void {
         return;
       }
       ($('pd-tilt') as HTMLInputElement).value = ((Math.atan((ridge - eave) / run) * 180) / Math.PI).toFixed(2);
+      ($('pd-tiltpct') as HTMLInputElement).value = (((ridge - eave) / run) * 100).toFixed(1);
       manual();
     };
   }
@@ -1042,6 +1085,7 @@ function setMode(m: typeof st.mode): void {
                <option value="deux-court">2 pans, faîtage sur la largeur</option>
                <option value="mono">1 pan (monopente vers le sud)</option></select></label>
              <label class="field">Pente (°)<input id="rg-tilt" type="number" min="0" max="60" step="0.5" value="${st.roofGen.tilt}" /></label>
+             <label class="field">Pente (%)<input id="rg-tiltpct" type="number" min="0" max="175" step="1" value="${degToPct(st.roofGen.tilt).toFixed(1)}" /></label>
              <label class="field">Gouttière / sol naturel (m)<input id="rg-eave" type="number" min="0" max="30" step="0.1" value="${st.roofGen.eave}" /></label>
            </span>`
         : st.mode === 'addvol'
@@ -1059,7 +1103,8 @@ function setMode(m: typeof st.mode): void {
         eave: Number(($('rg-eave') as HTMLInputElement).value),
       };
     };
-    for (const id of ['rg-kind', 'rg-tilt', 'rg-eave']) $(id).onchange = upd;
+    for (const id of ['rg-kind', 'rg-eave']) $(id).onchange = upd;
+    linkSlope('rg-tilt', 'rg-tiltpct', upd);
   }
   if (st.mode === 'vertices' && !st.selectedPan && st.pans[0]) st.selectedPan = st.pans[0].id;
   renderPans();

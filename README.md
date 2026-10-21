@@ -69,6 +69,16 @@ Pour ajouter une zone : `python3 tools/fetch_pvgis.py <lat> <lon>` (les coordonn
 - **% de soleil perdu** = 1 − rayonnement reçu / rayonnement sans aucun masque (arbres, bâtiments et relief lointain ; détail au survol).
 - **Électrique** : 3 sous-chaînes par panneau protégées par diodes bypass ; température des cellules (NOCT) ; micro-onduleurs = chaque panneau optimisé seul ; onduleur central = un MPPT par pan, panneaux du pan en série (un panneau ombré pénalise la chaîne).
 
+### Dates et calage photo / LiDAR
+
+L'application affiche la **date du survol LiDAR** (métadonnées LiDAR HD) et la **date de la photo aérienne** (graphe de mosaïquage BD ORTHO), et prévient si la photo est bien plus récente.
+
+La photo IGN n'est pas une « vraie ortho » : le sol est juste, mais les toits y sont décalés de quelques dizaines de centimètres à 1-2 m (inclinaison de la prise de vue). **📐 Caler la photo** affiche en rose les bords des toits mesurés par le LiDAR et propose :
+- **Auto** : corrélation entre les arêtes de la photo et celles des bâtiments LiDAR (fenêtre élargie automatiquement s'il y a peu de bâtiments) ;
+- des flèches pour ajuster à la main (10 cm, ou 50 cm avec Maj).
+
+Le décalage ne s'applique qu'à la photo : les calculs restent dans les coordonnées LiDAR. Une fois la photo calée sur les toits voisins, un toit dessiné à la main tombe au bon endroit.
+
 Limites : les photos aériennes ne sont pas des « vraies ortho » (les toits peuvent paraître décalés par rapport au LiDAR, qui fait foi) ; les données LiDAR datent du survol IGN (arbres plus grands aujourd'hui ?) ; les caractéristiques des panneaux sont indicatives.
 
 ## Développement

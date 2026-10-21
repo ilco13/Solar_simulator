@@ -140,6 +140,18 @@
           <label><input type="checkbox" id="ly-pans" checked /> Pans</label>
           <label><input type="checkbox" id="ly-panels" checked /> Panneaux</label>
           <label><input type="checkbox" id="ly-trees" checked /> Arbres</label>
+          <button id="btn-calage" title="Superposer correctement la photo aérienne et le relief LiDAR">📐 Caler la photo</button>
+        </div>
+        <div id="calage" class="panel-float" hidden>
+          <div class="small"><b>Calage photo / LiDAR</b> — les contours <span style="color:#e028c8">roses</span> sont les bords des toits mesurés par le LiDAR. Déplacez la photo pour que les toits tombent dedans.</div>
+          <div class="pad">
+            <span></span><button data-n="0,1" title="Nord">↑</button><span></span>
+            <button data-n="-1,0" title="Ouest">←</button><button id="cal-auto" title="Calage automatique">Auto</button><button data-n="1,0" title="Est">→</button>
+            <span></span><button data-n="0,-1" title="Sud">↓</button><span></span>
+          </div>
+          <div class="small">Pas : 10 cm (Maj + clic : 50 cm)</div>
+          <div id="cal-v" class="small"></div>
+          <div class="row"><button id="cal-reset">Réinitialiser</button><button id="cal-close">Fermer</button></div>
         </div>
         <div id="timebar" class="panel-float" hidden>
           <button id="play" title="Animer la journée">▶</button>

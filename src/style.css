@@ -166,3 +166,9 @@ tbody tr { cursor: default; }
 #loss-legend .ramp span { display: flex; flex-direction: column; align-items: center; gap: 2px; }
 #loss-legend .ramp i { width: 26px; height: 10px; border-radius: 2px; border: 1px solid var(--border); }
 .tree-icon.removed img { filter: grayscale(1); opacity: 0.45; }
+#layers button { margin-top: 4px; font-size: 12px; }
+#calage { top: 170px; right: 10px; width: 250px; padding: 8px 10px; }
+#calage .pad { display: grid; grid-template-columns: repeat(3, 44px); gap: 4px; justify-content: center; margin: 8px 0 4px; }
+#calage .pad button { padding: 4px 0; }
+.warn { color: var(--warn); }
+#data-dates { margin-top: 4px; }

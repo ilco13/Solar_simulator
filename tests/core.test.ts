@@ -225,3 +225,25 @@ describe('toit automatique', async () => {
     expect((Math.atan((5.3 - 3) / 4) * 180) / Math.PI).toBeCloseTo(29.9, 1);
   });
 });
+
+describe('calage photo / LiDAR', async () => {
+  const { findOffset, lidarEdges } = await import('../src/calage');
+  it('retrouve un décalage connu', () => {
+    const n = 120;
+    const ndsm = new Float32Array(n * n);
+    const mask = new Uint8Array(n * n).fill(1);
+    const photo = new Float32Array(n * n).fill(80);
+    // 3 "maisons" ; sur la photo elles sont décalées de +3 colonnes (est) et +2 lignes (sud)
+    for (const [i0, j0, w, h] of [[20, 30, 16, 12], [60, 50, 20, 14], [40, 85, 14, 18]])
+      for (let j = j0; j < j0 + h; j++)
+        for (let i = i0; i < i0 + w; i++) {
+          ndsm[j * n + i] = 6;
+          photo[(j + 2) * n + i + 3] = 200;
+        }
+    const r = findOffset(photo, lidarEdges(ndsm, mask, n), n, 0.5, 8);
+    // il faut ramener la photo de 1,5 m vers l'ouest et 1 m vers le nord
+    expect(r.dx).toBeCloseTo(-1.5, 1);
+    expect(r.dy).toBeCloseTo(1.0, 1);
+    expect(r.confidence).toBeGreaterThan(3);
+  });
+});

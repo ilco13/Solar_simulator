@@ -3,7 +3,8 @@ import './style.css';
 import L from 'leaflet';
 import { type XY, compass, distToRing, gridNorthOffset, pointInPolygon, ringArea, ringCentroid, toL93, toWGS } from './geo';
 import type { Grid } from './grid';
-import { type Building, ORTHO_URL, fetchBuildings, fetchElevation, geocode } from './ign';
+import { type Building, ORTHO_URL, fetchBuildings, fetchElevation, fetchLidarDate, fetchOrthoDate, fetchOrthoGray, geocode } from './ign';
+import { findOffset, lidarEdges } from './calage';
 import { type RoofPan, type RoofKind, azimuthFromEdge, detectObstacles, edgeForAzimuth, generateRoof, groundUnder, guessGutter, gutterEdge, panRun, detectPans, panArea, planeAzimuth, planeFrom, planeFromDsm, planeTilt, planeZ, virtualPlane } from './roof';
 import { type Tree, detectTrees } from './trees';
 import { type Scene, sceneMaxZ } from './shading';
@@ -35,6 +36,7 @@ interface Project {
   removedTrees: string[]; // arbres abattus depuis le survol LiDAR
   volumes: { ring: XY[]; height: number }[]; // constructions récentes absentes du LiDAR
   lidarMissing?: boolean; // maison construite après le survol LiDAR : pans dessinés
+  photoOffset?: { dx: number; dy: number }; // décalage de la photo aérienne pour la caler sur le LiDAR (m, est/nord)
   view?: { lat: number; lon: number; zoom: number };
 }
 
@@ -130,8 +132,11 @@ function panelKey(p: PlacedPanel): string {
 
 const v0 = st.project.view;
 const map = L.map('map', { maxZoom: 22, zoomSnap: 0.5, doubleClickZoom: false }).setView(v0 ? [v0.lat, v0.lon] : PEYNIER, v0?.zoom ?? 16);
-L.tileLayer(ORTHO_URL, { maxNativeZoom: 19, maxZoom: 22, attribution: 'Orthophotos, LiDAR HD, BD TOPO © IGN · Ensoleillement PVGIS © Commission européenne' }).addTo(map);
+map.createPane('photo').style.zIndex = '200';
+L.tileLayer(ORTHO_URL, { pane: 'photo', maxNativeZoom: 19, maxZoom: 22, attribution: 'Orthophotos, LiDAR HD, BD TOPO © IGN · Ensoleillement PVGIS © Commission européenne' }).addTo(map);
 map.createPane('relief').classList.add('relief-pane');
+map.createPane('edges').style.zIndex = '460';
+map.getPane('edges')!.style.pointerEvents = 'none';
 map.createPane('shadow').classList.add('shadow-pane');
 map.getPane('shadow')!.style.pointerEvents = 'none';
 
@@ -325,6 +330,7 @@ async function analyze(building: { id: string; ring: XY[] }, savedPans: RoofPan[
   setBusy('Téléchargement du LiDAR HD (IGN)…');
   status('');
   const weatherP = loadWeather(st.lat, st.lon).catch((e) => e as Error);
+  void Promise.all([fetchLidarDate(cx, cy), fetchOrthoDate(cx, cy)]).then(([li, od]) => renderDates(li, od));
   const [dsm, dtm, bats] = await Promise.all([
     fetchElevation('MNS', cx, cy, DATA_HALF),
     fetchElevation('MNT', cx, cy, DATA_HALF),
@@ -379,6 +385,7 @@ async function analyze(building: { id: string; ring: XY[] }, savedPans: RoofPan[
     ev.preventDefault();
     startPick();
   };
+  applyPhotoOffset();
   layers.pick.clearLayers();
   if (building.id !== 'dessin') L.polygon(building.ring.map((p) => ll(p[0], p[1])), { color: '#fff', weight: 1, dashArray: '4 4', fill: false, interactive: false }).addTo(layers.pick);
   const bounds = L.latLngBounds(building.ring.map((p) => ll(p[0], p[1])));
@@ -391,6 +398,167 @@ async function analyze(building: { id: string; ring: XY[] }, savedPans: RoofPan[
 }
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
+
+// ---------- Dates des données ----------
+
+const frDate = (iso: string) => new Date(iso + 'T12:00:00Z').toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' });
+
+function renderDates(li: { start: string; end: string; mission: string } | null, ortho: string | null): void {
+  let el = document.getElementById('data-dates');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'data-dates';
+    el.className = 'small';
+    $('loc-hint').after(el);
+  }
+  const lidar = li ? (li.start === li.end ? frDate(li.start) : `${frDate(li.start)} → ${frDate(li.end)}`) : 'date inconnue';
+  const years = li && ortho ? (Date.parse(ortho) - Date.parse(li.end)) / (365.25 * 86400e3) : 0;
+  el.innerHTML = `📅 <b>LiDAR HD</b> (relief, arbres) : relevé le ${lidar}${li?.mission ? ` (mission ${li.mission})` : ''}<br>
+    📷 <b>Photo aérienne</b> : prise le ${ortho ? frDate(ortho) : 'date inconnue'}
+    ${years > 1 ? `<br><span class="warn">La photo a ${Math.round(years)} an(s) de plus que le LiDAR : ce qui a été construit, planté ou abattu entre-temps n'est pas dans le relief (voir « ＋ Volume », toit dessiné, clic droit sur un arbre).</span>` : ''}`;
+}
+
+// ---------- Calage photo / LiDAR ----------
+
+let edgesOverlay: GridOverlay | null = null;
+
+function applyPhotoOffset(): void {
+  const o = st.project.photoOffset ?? { dx: 0, dy: 0 };
+  const pane = map.getPane('photo')!;
+  if (!o.dx && !o.dy) {
+    pane.style.transform = '';
+    return;
+  }
+  const [x, y] = st.dsm ? [st.dsm.x0 + (st.dsm.w * st.dsm.res) / 2, st.dsm.y0 - (st.dsm.h * st.dsm.res) / 2] : toL93(map.getCenter().lat, map.getCenter().lng);
+  const p0 = map.latLngToLayerPoint(ll(x, y));
+  const p1 = map.latLngToLayerPoint(ll(x + o.dx, y + o.dy));
+  pane.style.transform = `translate(${p1.x - p0.x}px, ${p1.y - p0.y}px)`;
+}
+map.on('zoomend viewreset', applyPhotoOffset);
+
+/** Masque des emprises de bâtiments (BD TOPO, +1 m) sur une fenêtre de la grille. */
+function buildingMask(i0: number, j0: number, n: number): Uint8Array {
+  const g = st.dsm!;
+  const m = new Uint8Array(n * n);
+  for (const b of st.buildings) {
+    const xs = b.ring.map((p) => p[0]);
+    const ys = b.ring.map((p) => p[1]);
+    const a0 = Math.max(0, Math.floor((Math.min(...xs) - 1 - g.x0) / g.res) - i0);
+    const a1 = Math.min(n - 1, Math.floor((Math.max(...xs) + 1 - g.x0) / g.res) - i0);
+    const b0 = Math.max(0, Math.floor((g.y0 - Math.max(...ys) - 1) / g.res) - j0);
+    const b1 = Math.min(n - 1, Math.floor((g.y0 - Math.min(...ys) + 1) / g.res) - j0);
+    for (let j = b0; j <= b1; j++)
+      for (let i = a0; i <= a1; i++) {
+        const x = g.x0 + (i0 + i + 0.5) * g.res;
+        const y = g.y0 - (j0 + j + 0.5) * g.res;
+        if (pointInPolygon(x, y, b.ring) || distToRing(x, y, b.ring) < 1) m[j * n + i] = 1;
+      }
+  }
+  return m;
+}
+
+function calageWindow(half: number) {
+  const g = st.dsm!;
+  const n = Math.min(g.w, Math.round((2 * half) / g.res));
+  const i0 = Math.floor((g.w - n) / 2);
+  const ndsm = new Float32Array(n * n);
+  for (let j = 0; j < n; j++)
+    for (let i = 0; i < n; i++) {
+      const k = (i0 + j) * g.w + i0 + i;
+      ndsm[j * n + i] = st.dsmBase![k] - st.dtm!.data[k];
+    }
+  return { n, i0, j0: i0, ndsm, mask: buildingMask(i0, i0, n) };
+}
+
+function showEdges(on: boolean): void {
+  if (edgesOverlay) {
+    map.removeLayer(edgesOverlay);
+    edgesOverlay = null;
+  }
+  if (!on || !st.dsm) return;
+  const g = st.dsm;
+  const w = calageWindow(SHADOW_HALF);
+  const e = lidarEdges(w.ndsm, w.mask, w.n);
+  edgesOverlay = new GridOverlay(g.x0 + w.i0 * g.res, g.y0 - w.j0 * g.res, w.n * g.res, w.n * g.res, w.n, w.n, 'edges');
+  const ctx = edgesOverlay.canvas.getContext('2d')!;
+  const img = ctx.createImageData(w.n, w.n);
+  for (let k = 0; k < e.length; k++) {
+    if (e[k] < 6) continue;
+    img.data.set([255, 40, 200, Math.min(255, e[k] * 12)], k * 4);
+  }
+  ctx.putImageData(img, 0, 0);
+  edgesOverlay.addTo(map);
+}
+
+function renderCalage(msg = ''): void {
+  const o = st.project.photoOffset ?? { dx: 0, dy: 0 };
+  $('cal-v').innerHTML = `Décalage de la photo : <b>${o.dx >= 0 ? 'est' : 'ouest'} ${fmt(Math.abs(o.dx), 2)} m</b>, <b>${o.dy >= 0 ? 'nord' : 'sud'} ${fmt(Math.abs(o.dy), 2)} m</b>${msg ? `<br>${msg}` : ''}`;
+}
+
+function nudge(dx: number, dy: number): void {
+  const o = st.project.photoOffset ?? { dx: 0, dy: 0 };
+  st.project.photoOffset = { dx: Math.round((o.dx + dx) * 100) / 100, dy: Math.round((o.dy + dy) * 100) / 100 };
+  applyPhotoOffset();
+  renderCalage();
+  save();
+}
+
+async function autoCalage(): Promise<void> {
+  if (!st.dsm) return;
+  setBusy('Calage automatique photo / LiDAR…');
+  try {
+    const g = st.dsm;
+    // fenêtre de plus en plus grande tant que le pic de corrélation n'est pas net
+    // (lotissement récent : peu de bâtiments dans le LiDAR autour de la maison)
+    let r = { dx: 0, dy: 0, confidence: 0 };
+    for (const half of [50, 90, DATA_HALF - 5]) {
+      const w = calageWindow(half);
+      const photo = await fetchOrthoGray(g.x0 + w.i0 * g.res, g.y0 - w.j0 * g.res, w.n * g.res, w.n);
+      const c = findOffset(photo, lidarEdges(w.ndsm, w.mask, w.n), w.n, g.res, 8);
+      if (c.confidence > r.confidence) r = c;
+      if (r.confidence >= 5) break;
+    }
+    if (r.confidence < 4) {
+      renderCalage(`<span class="warn">Calage automatique peu fiable (trop peu de bâtiments LiDAR nets autour). Ajustez avec les flèches.</span>`);
+      return;
+    }
+    st.project.photoOffset = { dx: Math.round(r.dx * 100) / 100, dy: Math.round(r.dy * 100) / 100 };
+    applyPhotoOffset();
+    renderCalage(`Calage automatique OK (confiance ${fmt(r.confidence, 1)}). Vérifiez que les contours roses tombent sur les bords des toits.`);
+    save();
+  } catch (e) {
+    renderCalage(`<span class="warn">Erreur : ${(e as Error).message}</span>`);
+  } finally {
+    setBusy(null);
+  }
+}
+
+$('btn-calage').onclick = () => {
+  if (!st.dsm) {
+    alert('Sélectionnez d\'abord votre maison.');
+    return;
+  }
+  const box = $('calage');
+  box.hidden = !box.hidden;
+  $('btn-calage').classList.toggle('on', !box.hidden);
+  showEdges(!box.hidden);
+  renderCalage();
+};
+$('cal-close').onclick = () => $('btn-calage').click();
+$('cal-auto').onclick = () => void autoCalage();
+$('cal-reset').onclick = () => {
+  st.project.photoOffset = { dx: 0, dy: 0 };
+  applyPhotoOffset();
+  renderCalage();
+  save();
+};
+document.querySelectorAll<HTMLButtonElement>('#calage [data-n]').forEach((b) =>
+  b.addEventListener('click', (e) => {
+    const step = (e as MouseEvent).shiftKey ? 0.5 : 0.1;
+    const [dx, dy] = b.dataset.n!.split(',').map(Number);
+    nudge(dx * step, dy * step);
+  }),
+);
 
 /** Recalcule le plan d'un pan dessiné : pente + azimut + hauteur de gouttière au-dessus du sol naturel. */
 function rebuildVirtual(pan: RoofPan): void {

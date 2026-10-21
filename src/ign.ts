@@ -120,3 +120,60 @@ export async function geocode(q: string): Promise<GeocodeResult[]> {
     lat: f.geometry.coordinates[1],
   }));
 }
+
+export interface LidarInfo {
+  start: string; // date de début d'acquisition (AAAA-MM-JJ)
+  end: string;
+  mission: string;
+}
+
+/** Date du survol LiDAR HD sur la dalle contenant (x, y). */
+export async function fetchLidarDate(x: number, y: number): Promise<LidarInfo | null> {
+  const bbox = [x - 1, y - 1, x + 1, y + 1].join(',');
+  try {
+    const r = await fetch(
+      `${WFS}?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature&TYPENAMES=IGNF_LIDAR-HD_METADONNEE:metadata&OUTPUTFORMAT=application/json&SRSNAME=EPSG:2154&BBOX=${bbox},EPSG:2154&COUNT=1`,
+    );
+    const p = (await r.json()).features?.[0]?.properties;
+    if (!p) return null;
+    const d = (s: string) => String(s ?? '').slice(0, 10);
+    return { start: d(p.date_debut_acquisition), end: d(p.date_fin_acquisition), mission: p.code_mission ?? '' };
+  } catch {
+    return null;
+  }
+}
+
+/** Date de prise de vue de la photo aérienne (BD ORTHO) en (x, y). */
+export async function fetchOrthoDate(x: number, y: number): Promise<string | null> {
+  const bbox = [x - 1, y - 1, x + 1, y + 1].join(',');
+  try {
+    const r = await fetch(
+      `${WFS}?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature&TYPENAMES=ORTHOIMAGERY.ORTHOPHOTOS.GRAPHE-MOSAIQUAGE:graphe_bdortho&OUTPUTFORMAT=application/json&SRSNAME=EPSG:2154&BBOX=${bbox},EPSG:2154&COUNT=5`,
+    );
+    const fs = (await r.json()).features ?? [];
+    // la plus fine (plus petite échelle de mosaïquage)
+    fs.sort((a: any, b: any) => (a.properties.echelle ?? 99) - (b.properties.echelle ?? 99));
+    return fs[0] ? String(fs[0].properties.date_vol).slice(0, 10) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Photo aérienne en Lambert-93, pixels alignés sur la grille LiDAR (luminance 0-255, ligne 0 = nord). */
+export async function fetchOrthoGray(x0: number, y1: number, size: number, n: number): Promise<Float32Array> {
+  const url =
+    `${WMS}?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&LAYERS=ORTHOIMAGERY.ORTHOPHOTOS&STYLES=&CRS=EPSG:2154` +
+    `&BBOX=${x0},${y1 - size},${x0 + size},${y1}&WIDTH=${n}&HEIGHT=${n}&FORMAT=image/jpeg`;
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`Photo IGN : HTTP ${r.status}`);
+  const bmp = await createImageBitmap(await r.blob());
+  const c = document.createElement('canvas');
+  c.width = n;
+  c.height = n;
+  const ctx = c.getContext('2d')!;
+  ctx.drawImage(bmp, 0, 0, n, n);
+  const d = ctx.getImageData(0, 0, n, n).data;
+  const out = new Float32Array(n * n);
+  for (let k = 0; k < n * n; k++) out[k] = 0.299 * d[4 * k] + 0.587 * d[4 * k + 1] + 0.114 * d[4 * k + 2];
+  return out;
+}

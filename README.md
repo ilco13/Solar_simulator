@@ -28,6 +28,8 @@ npm run dev        # puis ouvrir http://localhost:5173
 Le LiDAR HD date du survol IGN : une maison construite après n'y figure pas (ni souvent dans le cadastre BD TOPO). L'application le détecte (hauteur mesurée ≈ 0) et passe en **mode dessin** :
 
 - cliquez sur la maison et acceptez de la dessiner ;
+- **🏠 Toit auto** : cliquez les 4 coins du toit (débords compris) et choisissez 4 pans, 2 pans ou monopente : les pans, gouttières, faîtage et arêtiers sont générés ;
+- les hauteurs (gouttière, faîtage) se mesurent depuis le **sol naturel** = terrain LiDAR IGN, relevé avant les travaux ; saisir le faîtage recalcule la pente et inversement ;
 - **＋ Pan** : cliquez les coins de chaque pan sur la photo, **en commençant par les 2 coins de la gouttière** (bas de pente) ; l'azimut en est déduit ;
 - réglez la **pente** et la **hauteur de gouttière** dans le détail du pan ;
 - le toit dessiné est ajouté au modèle 3D (il fait de l'ombre et en reçoit) ;

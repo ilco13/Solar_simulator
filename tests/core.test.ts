@@ -199,3 +199,29 @@ describe('toit 4 pans (trapèze)', async () => {
     }
   });
 });
+
+describe('toit automatique', async () => {
+  const { generateRoof, panRun, virtualPlane, planeZ, azimuthFromEdge } = await import('../src/roof');
+  const dtm = { x0: -20, y0: 30, res: 0.5, w: 120, h: 120, data: new Float32Array(14400).fill(100) };
+  // maison 12 × 8 m, coins cliqués un peu de travers
+  const corners: [number, number][] = [[0, 0], [12, 0.05], [12, 8], [0.05, 8]];
+  it('4 pans : 2 trapèzes + 2 triangles, faîtage commun à la même hauteur', () => {
+    const pans = generateRoof(corners, 'quatre');
+    expect(pans.map((p) => p.ring.length).sort()).toEqual([3, 3, 4, 4]);
+    const ridges = pans.map((p) => {
+      const az = azimuthFromEdge(p.ring, p.gutter, 0);
+      const pl = virtualPlane(p.ring, 30, az, 3, 0, dtm, 100);
+      return Math.max(...p.ring.map((q) => planeZ(pl, q[0], q[1])));
+    });
+    for (const r of ridges) expect(r).toBeCloseTo(103 + 4 * Math.tan(Math.PI / 6), 1);
+  });
+  it('2 pans sur la longueur : largeur gouttière → faîtage = demi-largeur', () => {
+    const pans = generateRoof(corners, 'deux-long');
+    expect(pans).toHaveLength(2);
+    expect(panRun(pans[0].ring, 0)).toBeCloseTo(4, 1);
+  });
+  it('faîtage saisi -> pente', () => {
+    // gouttière 3 m, faîtage 5,3 m, demi-largeur 4 m -> atan(2,3/4) = 29,9°
+    expect((Math.atan((5.3 - 3) / 4) * 180) / Math.PI).toBeCloseTo(29.9, 1);
+  });
+});

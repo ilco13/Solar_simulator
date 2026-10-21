@@ -24,6 +24,10 @@ export interface RoofPan {
   eaveHeight?: number;
   /** Côté de gouttière (ring[gutter] → ring[gutter+1]) : les rangées de panneaux lui sont parallèles. */
   gutter?: number;
+  /** Altitude (m NGF) du sol naturel de référence pour la hauteur de gouttière (MNT IGN). */
+  ground?: number;
+  /** Pans générés ensemble (même toit) : pente et hauteurs se modifient ensemble. */
+  group?: string;
 }
 
 export function planeZ(p: Plane, x: number, y: number): number {
@@ -54,7 +58,7 @@ export function planeFrom(tiltDeg: number, azTrueDeg: number, northOffset: numbe
  * Plan d'un pan dessiné (absent du LiDAR) : pente + azimut saisis, et la gouttière
  * (point le plus bas du contour) à `eaveHeight` au-dessus du sol (MNT).
  */
-export function virtualPlane(ring: XY[], tiltDeg: number, azTrueDeg: number, eaveHeight: number, northOffset: number, dtm: Grid): Plane {
+export function virtualPlane(ring: XY[], tiltDeg: number, azTrueDeg: number, eaveHeight: number, northOffset: number, dtm: Grid, groundZ?: number): Plane {
   const p0 = planeFrom(tiltDeg, azTrueDeg, northOffset, 0, 0, 0);
   // sommet le plus bas selon la pente
   let low = ring[0];
@@ -68,7 +72,7 @@ export function virtualPlane(ring: XY[], tiltDeg: number, azTrueDeg: number, eav
       n++;
     }
   }
-  ground = n ? ground / n : 0;
+  ground = groundZ ?? (n ? ground / n : 0);
   return planeFrom(tiltDeg, azTrueDeg, northOffset, low[0], low[1], ground + eaveHeight);
 }
 
@@ -154,6 +158,94 @@ export function gutterEdge(pan: RoofPan): number | null {
   const maxLen = Math.max(...cands.map((c) => c.len));
   const good = cands.filter((c) => c.len >= 0.5 * maxLen).sort((p, q) => p.z - q.z);
   return good[0].i;
+}
+
+/** Altitude moyenne du sol naturel (MNT) aux sommets d'un contour. */
+export function groundUnder(ring: XY[], dtm: Grid): number {
+  let s = 0;
+  let n = 0;
+  for (const q of ring) {
+    const v = sampleNearest(dtm, q[0], q[1]);
+    if (Number.isFinite(v)) {
+      s += v;
+      n++;
+    }
+  }
+  return n ? s / n : 0;
+}
+
+/** Distance horizontale entre la gouttière et le point le plus éloigné du pan (montée jusqu'au faîtage). */
+export function panRun(ring: XY[], gutter: number): number {
+  const a = ring[gutter % ring.length];
+  const b = ring[(gutter + 1) % ring.length];
+  const len = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+  let run = 0;
+  for (const q of ring) run = Math.max(run, Math.abs(((b[0] - a[0]) * (q[1] - a[1]) - (b[1] - a[1]) * (q[0] - a[0])) / len));
+  return run;
+}
+
+export type RoofKind = 'deux-long' | 'deux-court' | 'quatre' | 'mono';
+
+/**
+ * Génère les pans d'un toit simple à partir des 4 coins cliqués (débords compris),
+ * recalés en rectangle sur le côté le plus long. Chaque pan a sa gouttière en côté 0.
+ */
+export function generateRoof(corners: XY[], kind: RoofKind): { ring: XY[]; gutter: number }[] {
+  // axe principal : le plus long côté cliqué
+  let best = 0;
+  let bl = -1;
+  for (let i = 0; i < corners.length; i++) {
+    const q = corners[(i + 1) % corners.length];
+    const l = Math.hypot(q[0] - corners[i][0], q[1] - corners[i][1]);
+    if (l > bl) {
+      bl = l;
+      best = i;
+    }
+  }
+  const q0 = corners[best];
+  const q1 = corners[(best + 1) % corners.length];
+  const dx = (q1[0] - q0[0]) / bl;
+  const dy = (q1[1] - q0[1]) / bl;
+  const nx = -dy;
+  const ny = dx;
+  const [cx, cy] = ringCentroid(corners);
+  let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity;
+  for (const p of corners) {
+    const u = (p[0] - cx) * dx + (p[1] - cy) * dy;
+    const v = (p[0] - cx) * nx + (p[1] - cy) * ny;
+    u0 = Math.min(u0, u); u1 = Math.max(u1, u); v0 = Math.min(v0, v); v1 = Math.max(v1, v);
+  }
+  const uc = (u0 + u1) / 2;
+  const vc = (v0 + v1) / 2;
+  const L = u1 - u0;
+  const W = v1 - v0;
+  const P = (u: number, v: number): XY => [cx + (uc + u) * dx + (vc + v) * nx, cy + (uc + u) * dy + (vc + v) * ny];
+  const l = L / 2;
+  const w = W / 2;
+  const dedupe = (r: XY[]) => r.filter((p, i) => i === 0 || Math.hypot(p[0] - r[i - 1][0], p[1] - r[i - 1][1]) > 0.01);
+  switch (kind) {
+    case 'mono':
+      return [{ ring: [P(-l, -w), P(l, -w), P(l, w), P(-l, w)], gutter: 0 }];
+    case 'deux-long':
+      return [
+        { ring: [P(-l, -w), P(l, -w), P(l, 0), P(-l, 0)], gutter: 0 },
+        { ring: [P(l, w), P(-l, w), P(-l, 0), P(l, 0)], gutter: 0 },
+      ];
+    case 'deux-court':
+      return [
+        { ring: [P(-l, w), P(-l, -w), P(0, -w), P(0, w)], gutter: 0 },
+        { ring: [P(l, -w), P(l, w), P(0, w), P(0, -w)], gutter: 0 },
+      ];
+    case 'quatre': {
+      const h = Math.min(w, l);
+      return [
+        { ring: dedupe([P(-l, -w), P(l, -w), P(l - h, 0), P(-l + h, 0)]), gutter: 0 },
+        { ring: dedupe([P(l, w), P(-l, w), P(-l + h, 0), P(l - h, 0)]), gutter: 0 },
+        { ring: [P(-l, w), P(-l, -w), P(-l + h, 0)], gutter: 0 },
+        { ring: [P(l, -w), P(l, w), P(l - h, 0)], gutter: 0 },
+      ];
+    }
+  }
 }
 
 /** Surface réelle (inclinée) du pan, m². */

@@ -4,7 +4,7 @@ import L from 'leaflet';
 import { type XY, compass, distToRing, gridNorthOffset, pointInPolygon, ringArea, ringCentroid, toL93, toWGS } from './geo';
 import type { Grid } from './grid';
 import { type Building, ORTHO_URL, fetchBuildings, fetchElevation, geocode } from './ign';
-import { type RoofPan, azimuthFromEdge, detectObstacles, edgeForAzimuth, guessGutter, gutterEdge, detectPans, panArea, planeAzimuth, planeFrom, planeFromDsm, planeTilt, planeZ, virtualPlane } from './roof';
+import { type RoofPan, type RoofKind, azimuthFromEdge, detectObstacles, edgeForAzimuth, generateRoof, groundUnder, guessGutter, gutterEdge, panRun, detectPans, panArea, planeAzimuth, planeFrom, planeFromDsm, planeTilt, planeZ, virtualPlane } from './roof';
 import { type Tree, detectTrees } from './trees';
 import { type Scene, sceneMaxZ } from './shading';
 import { type LayoutOptions, type PlacedPanel, DEFAULT_LAYOUT, fromPlane, layoutPan, panFrame, toPlane } from './layout';
@@ -94,7 +94,8 @@ const st = {
   resultPanels: [] as string[], // id des panneaux, dans l'ordre du résultat
   resultPans: [] as string[],
   selectedPan: null as string | null,
-  mode: 'none' as 'none' | 'vertices' | 'addpan' | 'addobs' | 'addvol',
+  mode: 'none' as 'none' | 'vertices' | 'addpan' | 'addobs' | 'addvol' | 'addroof',
+  roofGen: { kind: 'quatre' as RoofKind, tilt: 17, eave: 2.8 },
   draft: [] as XY[],
   hoverPanel: null as string | null,
 };
@@ -307,7 +308,7 @@ map.on('click', (e: L.LeafletMouseEvent) => {
     return;
   }
   const p = toL93(e.latlng.lat, e.latlng.lng);
-  if (st.mode === 'addpan' || st.mode === 'addvol') addDraftPoint(p);
+  if (st.mode === 'addpan' || st.mode === 'addvol' || st.mode === 'addroof') addDraftPoint(p);
   else if (st.mode === 'addobs') addObstaclePoint(p);
 });
 
@@ -354,7 +355,7 @@ async function analyze(building: { id: string; ring: XY[] }, savedPans: RoofPan[
       if (pan.eaveHeight !== undefined) {
         pan.gutter = guessGutter(pan.ring);
         pan.manualAzimuth = azimuthFromEdge(pan.ring, pan.gutter, st.northOffset);
-        pan.plane = virtualPlane(pan.ring, pan.manualTilt ?? st.lastTilt, pan.manualAzimuth, pan.eaveHeight, st.northOffset, dtm);
+        rebuildVirtual(pan);
       }
     st.project.version = 2;
   }
@@ -391,6 +392,13 @@ async function analyze(building: { id: string; ring: XY[] }, savedPans: RoofPan[
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
+/** Recalcule le plan d'un pan dessiné : pente + azimut + hauteur de gouttière au-dessus du sol naturel. */
+function rebuildVirtual(pan: RoofPan): void {
+  if (pan.eaveHeight === undefined || !st.dtm) return;
+  if (pan.ground === undefined) pan.ground = groundUnder(pan.ring, st.dtm);
+  pan.plane = virtualPlane(pan.ring, pan.manualTilt ?? st.lastTilt, pan.manualAzimuth ?? 180, pan.eaveHeight, st.northOffset, st.dtm, pan.ground);
+}
+
 /** Hauteur médiane (MNS − MNT) dans une emprise : ~0 si la maison n'existait pas lors du survol LiDAR. */
 function roofHeight(ring: XY[]): number {
   const g = st.dsm!;
@@ -418,7 +426,7 @@ function renderLidarNotice(): void {
     el.className = 'weather-warn';
     $('pan-list').before(el);
   }
-  el.innerHTML = `<b>Maison absente du LiDAR IGN</b> (survol antérieur à la construction). Dessinez chaque pan avec <b>« ＋ Pan »</b> sur la photo. La <b>gouttière</b> (trait épais) est déduite des côtés parallèles, ou du 1er côté dessiné ; les panneaux s'alignent dessus. Réglez ensuite la pente et la hauteur de gouttière : le toit est ajouté au modèle 3D pour les ombres.
+  el.innerHTML = `<b>Maison absente du LiDAR IGN</b> (survol antérieur à la construction). Le plus simple : <b>« 🏠 Toit auto »</b>, puis cliquez les 4 coins du toit (2 pans, 4 pans ou monopente). Sinon, dessinez chaque pan avec <b>« ＋ Pan »</b>. La <b>gouttière</b> (trait épais) est déduite des côtés parallèles, ou du 1er côté dessiné ; les panneaux s'alignent dessus. Réglez ensuite la pente et la hauteur de gouttière : le toit est ajouté au modèle 3D pour les ombres.
     Des voisins construits récemment ? Ajoutez-les avec <b>« ＋ Volume »</b>. Un arbre abattu depuis ? <b>Clic droit</b> sur son icône.`;
 }
 
@@ -653,7 +661,7 @@ function panColor(pan: RoofPan): string {
 
 function panInfo(pan: RoofPan) {
   const tilt = planeTilt(pan.plane);
-  const az = planeAzimuth(pan.plane, st.northOffset);
+  const az = Math.round(planeAzimuth(pan.plane, st.northOffset) * 10) / 10 % 360;
   return { tilt, az, area: panArea(pan), label: tilt < 3 ? 'plat' : `${compass(az)} ${fmt(az)}°` };
 }
 
@@ -676,7 +684,7 @@ function renderPans(): void {
       L.polyline([ll(a[0], a[1]), ll(b[0], b[1])], { color: col, weight: sel ? 7 : 5, opacity: 0.9, interactive: false }).addTo(layers.pans);
     }
     poly.on('click', (e) => {
-      if (st.mode === 'addpan' || st.mode === 'addobs' || st.mode === 'addvol') {
+      if (st.mode === 'addpan' || st.mode === 'addobs' || st.mode === 'addvol' || st.mode === 'addroof') {
         map.fire('click', e);
         return;
       }
@@ -742,8 +750,11 @@ function renderPanDetail(): void {
       <label class="field">Utiliser ce pan<select id="pd-en"><option value="1">Oui</option><option value="0"${pan.enabled ? '' : ' selected'}>Non</option></select></label>
       <label class="field">Pente (°)<input id="pd-tilt" type="number" min="0" max="70" step="0.5" value="${info.tilt.toFixed(1)}" /></label>
       <label class="field">Azimut (° depuis le nord)<input id="pd-az" type="number" min="0" max="359" step="1" value="${info.az.toFixed(0)}" /></label>
-      ${virt ? `<label class="field">Hauteur de gouttière (m)<input id="pd-eave" type="number" min="0" max="30" step="0.1" value="${pan.eaveHeight!.toFixed(1)}" /></label>` : ''}
+      ${virt ? `<label class="field">Hauteur de gouttière (m)<input id="pd-eave" type="number" min="0" max="30" step="0.1" value="${pan.eaveHeight!.toFixed(2)}" /></label>
+      <label class="field">Hauteur de faîtage (m)<input id="pd-ridge" type="number" min="0" max="40" step="0.1" value="${(pan.eaveHeight! + panRun(pan.ring, pan.gutter ?? 0) * Math.tan((info.tilt * Math.PI) / 180)).toFixed(2)}" /></label>
+      <label class="field">Sol naturel (m NGF)<input id="pd-ground" type="number" step="0.1" value="${(pan.ground ?? 0).toFixed(2)}" /></label>` : ''}
     </div>
+    ${virt ? `<div class="small">Hauteurs mesurées depuis le sol naturel : terrain LiDAR IGN relevé avant les travaux. Pente et faîtage sont liés (largeur gouttière → faîtage : ${fmt(panRun(pan.ring, pan.gutter ?? 0), 2)} m).${pan.group ? ' <b>Pente, hauteurs et sol s\'appliquent à tous les pans de ce toit.</b>' : ''}</div>` : ''}
     <div class="small">${virt ? 'Pan dessiné (absent du LiDAR) : pente, azimut et hauteur saisis.' : pan.manualTilt !== undefined || pan.manualAzimuth !== undefined ? 'Pente/azimut saisis à la main.' : 'Pente et azimut mesurés sur le LiDAR.'}
       ${pan.obstacles.length} obstacle(s).</div>
     <div class="row wrap">
@@ -766,21 +777,43 @@ function renderPanDetail(): void {
     pan.manualAzimuth = az;
     if (virt) {
       pan.gutter = edgeForAzimuth(pan.ring, az, st.northOffset);
-      pan.eaveHeight = Number(($('pd-eave') as HTMLInputElement).value);
+      const eave = Number(($('pd-eave') as HTMLInputElement).value);
+      const ground = Number(($('pd-ground') as HTMLInputElement).value);
       st.lastTilt = tilt;
-      st.lastEave = pan.eaveHeight;
-      pan.plane = virtualPlane(pan.ring, tilt, az, pan.eaveHeight, st.northOffset, st.dtm!);
+      st.lastEave = eave;
+      const roof = pan.group ? st.pans.filter((q) => q.group === pan.group) : [pan];
+      for (const q of roof) {
+        q.manualTilt = tilt;
+        q.eaveHeight = eave;
+        q.ground = ground;
+        rebuildVirtual(q);
+      }
     } else pan.plane = planeFrom(tilt, az, st.northOffset, cx, cy, planeZ(pan.plane, cx, cy));
     onPansChanged();
   };
   $('pd-tilt').onchange = manual;
   $('pd-az').onchange = manual;
-  if (virt) $('pd-eave').onchange = manual;
+  if (virt) {
+    $('pd-eave').onchange = manual;
+    $('pd-ground').onchange = manual;
+    // faîtage saisi -> pente recalculée
+    $('pd-ridge').onchange = () => {
+      const eave = Number(($('pd-eave') as HTMLInputElement).value);
+      const ridge = Number(($('pd-ridge') as HTMLInputElement).value);
+      const run = panRun(pan.ring, pan.gutter ?? 0);
+      if (ridge <= eave || run <= 0) {
+        alert('Le faîtage doit être plus haut que la gouttière.');
+        return;
+      }
+      ($('pd-tilt') as HTMLInputElement).value = ((Math.atan((ridge - eave) / run) * 180) / Math.PI).toFixed(2);
+      manual();
+    };
+  }
   if (virt)
     $('pd-gutter').onclick = () => {
       pan.gutter = ((pan.gutter ?? 0) + 1) % pan.ring.length;
       pan.manualAzimuth = azimuthFromEdge(pan.ring, pan.gutter, st.northOffset);
-      pan.plane = virtualPlane(pan.ring, pan.manualTilt ?? st.lastTilt, pan.manualAzimuth, pan.eaveHeight!, st.northOffset, st.dtm!);
+      rebuildVirtual(pan);
       onPansChanged();
     };
   if (!virt) $('pd-refit').onclick = () => {
@@ -824,6 +857,7 @@ function setMode(m: typeof st.mode): void {
   $('btn-addpan').classList.toggle('on', st.mode === 'addpan');
   $('btn-addobs').classList.toggle('on', st.mode === 'addobs');
   $('btn-addvol').classList.toggle('on', st.mode === 'addvol');
+  $('btn-addroof').classList.toggle('on', st.mode === 'addroof');
   const hint = $('edit-hint');
   hint.hidden = st.mode === 'none';
   hint.innerHTML =
@@ -831,12 +865,34 @@ function setMode(m: typeof st.mode): void {
       ? 'Sélectionnez un pan, puis <b>glissez ses sommets</b>. Point gris = ajouter un sommet. <b>Clic droit</b> sur un sommet = le supprimer. Les sommets s\'aimantent à ceux des pans voisins. Cliquez un obstacle rouge pour le supprimer.'
       : st.mode === 'addpan'
         ? `Cliquez les coins du pan sur la carte${st.project.lidarMissing ? ' (de préférence en commençant par les 2 coins de la gouttière)' : ''}. <b>Cliquez sur le premier point</b> pour fermer (Échap pour annuler).`
+        : st.mode === 'addroof'
+        ? `<b>Toit automatique</b> : réglez puis cliquez les <b>4 coins du toit</b> (débords compris).
+           <span class="grid2" style="margin-top:6px">
+             <label class="field">Type<select id="rg-kind">
+               <option value="quatre">4 pans (croupes)</option>
+               <option value="deux-long">2 pans, faîtage sur la longueur</option>
+               <option value="deux-court">2 pans, faîtage sur la largeur</option>
+               <option value="mono">1 pan (monopente vers le sud)</option></select></label>
+             <label class="field">Pente (°)<input id="rg-tilt" type="number" min="0" max="60" step="0.5" value="${st.roofGen.tilt}" /></label>
+             <label class="field">Gouttière / sol naturel (m)<input id="rg-eave" type="number" min="0" max="30" step="0.1" value="${st.roofGen.eave}" /></label>
+           </span>`
         : st.mode === 'addvol'
         ? 'Volume (maison voisine récente, mur, abri…) : cliquez ses coins, fermez sur le premier point, puis indiquez sa hauteur.'
         : st.mode === 'addobs'
           ? 'Sélectionnez le pan, puis cliquez <b>2 coins opposés</b> de l\'obstacle (cheminée, velux…).'
           : '';
-  map.getContainer().style.cursor = st.mode === 'addpan' || st.mode === 'addobs' || st.mode === 'addvol' ? 'crosshair' : '';
+  map.getContainer().style.cursor = st.mode === 'addpan' || st.mode === 'addobs' || st.mode === 'addvol' || st.mode === 'addroof' ? 'crosshair' : '';
+  if (st.mode === 'addroof') {
+    ($('rg-kind') as HTMLSelectElement).value = st.roofGen.kind;
+    const upd = () => {
+      st.roofGen = {
+        kind: ($('rg-kind') as HTMLSelectElement).value as RoofKind,
+        tilt: Number(($('rg-tilt') as HTMLInputElement).value),
+        eave: Number(($('rg-eave') as HTMLInputElement).value),
+      };
+    };
+    for (const id of ['rg-kind', 'rg-tilt', 'rg-eave']) $(id).onchange = upd;
+  }
   if (st.mode === 'vertices' && !st.selectedPan && st.pans[0]) st.selectedPan = st.pans[0].id;
   renderPans();
   renderDraft();
@@ -845,6 +901,7 @@ function setMode(m: typeof st.mode): void {
 $('btn-edit').onclick = () => setMode('vertices');
 $('btn-addpan').onclick = () => setMode('addpan');
 $('btn-addvol').onclick = () => setMode('addvol');
+$('btn-addroof').onclick = () => setMode('addroof');
 $('btn-addobs').onclick = () => {
   if (!st.selectedPan && st.pans[0]) st.selectedPan = st.pans[0].id;
   setMode('addobs');
@@ -940,7 +997,7 @@ function refitPan(pan: RoofPan): void {
     // la gouttière suit le côté le plus proche de l'ancienne orientation, et la pente lui reste perpendiculaire
     pan.gutter = edgeForAzimuth(pan.ring, pan.manualAzimuth ?? 180, st.northOffset);
     pan.manualAzimuth = azimuthFromEdge(pan.ring, pan.gutter, st.northOffset);
-    pan.plane = virtualPlane(pan.ring, pan.manualTilt ?? st.lastTilt, pan.manualAzimuth ?? 180, pan.eaveHeight, st.northOffset, st.dtm!);
+    rebuildVirtual(pan);
     return;
   }
   if (pan.manualTilt !== undefined) return;
@@ -955,7 +1012,7 @@ function renderDraft(): void {
     livePoly.remove();
     livePoly = null;
   }
-  if ((st.mode !== 'addpan' && st.mode !== 'addvol') || !st.draft.length) {
+  if ((st.mode !== 'addpan' && st.mode !== 'addvol' && st.mode !== 'addroof') || !st.draft.length) {
     if (st.mode !== 'vertices') layers.edit.clearLayers();
     return;
   }
@@ -968,12 +1025,52 @@ function renderDraft(): void {
 }
 
 function addDraftPoint(p: XY): void {
+  if (st.mode === 'addroof') {
+    st.draft.push(p);
+    if (st.draft.length === 4) generateHouseRoof(st.draft.slice());
+    else renderDraft();
+    return;
+  }
   if (st.draft.length >= 3 && Math.hypot(p[0] - st.draft[0][0], p[1] - st.draft[0][1]) < 0.5) {
     closeDraft();
     return;
   }
   st.draft.push(snap(p, null as unknown as RoofPan, -1));
   renderDraft();
+}
+
+/** Toit généré à partir des 4 coins : 2 pans, 4 pans ou monopente. */
+function generateHouseRoof(corners: XY[]): void {
+  const g = st.roofGen;
+  const group = `toit${Date.now().toString(36)}`;
+  const ground = groundUnder(corners, st.dtm!);
+  const parts = generateRoof(corners, g.kind);
+  for (const part of parts) {
+    let n = st.pans.length + 1;
+    while (st.pans.some((p) => p.id === `pan${n}`)) n++;
+    const gutter = g.kind === 'mono' ? edgeForAzimuth(part.ring, 180, st.northOffset) : part.gutter;
+    const pan: RoofPan = {
+      id: `pan${n}`,
+      name: `Pan ${n}`,
+      ring: part.ring,
+      plane: { a: 0, b: 0, c: 0 },
+      obstacles: [],
+      enabled: true,
+      eaveHeight: g.eave,
+      manualTilt: g.tilt,
+      gutter,
+      manualAzimuth: azimuthFromEdge(part.ring, gutter, st.northOffset),
+      ground,
+      group,
+    };
+    rebuildVirtual(pan);
+    pan.name = `Pan ${n} (${compass(pan.manualAzimuth!)})`;
+    st.pans.push(pan);
+  }
+  st.selectedPan = st.pans[st.pans.length - parts.length]?.id ?? null;
+  st.draft = [];
+  setMode('addroof'); // sort du mode
+  onPansChanged();
 }
 
 function closeDraft(): void {
@@ -1002,7 +1099,7 @@ function closeDraft(): void {
     pan.manualTilt = st.lastTilt;
     pan.gutter = guessGutter(ring);
     pan.manualAzimuth = azimuthFromEdge(ring, pan.gutter, st.northOffset);
-    pan.plane = virtualPlane(ring, pan.manualTilt, pan.manualAzimuth, pan.eaveHeight, st.northOffset, st.dtm!);
+    rebuildVirtual(pan);
   } else {
     pan.plane = planeFromDsm(st.dsm!, ring) ?? planeFrom(30, 180, st.northOffset, cx, cy, st.dsm!.data[0]);
     pan.obstacles = detectObstacles(st.dsm!, pan);

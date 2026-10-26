@@ -195,6 +195,7 @@ function buildScene(): Scene | null {
     w: st.dsm.w,
     h: st.dsm.h,
     dsm: st.dsm.data,
+    dtm: st.dtm?.data,
     maxZ: sceneMaxZ(st.dsm.data),
     treeLabel: st.treeLabel,
     deciduous: deciduousArray(),
@@ -208,11 +209,13 @@ function buildScene(): Scene | null {
 function pushScene(): void {
   const s = buildScene();
   if (!s) return;
+  sceneVersion++;
   post(shadowWorker, { type: 'scene', scene: s });
   post(simWorker, { type: 'scene', scene: s });
 }
 
 function pushTrees(): void {
+  sceneVersion++;
   const m: WorkerRequest = { type: 'trees', leafless: st.project.leafless, deciduous: deciduousArray(), leaflessTransmission: st.project.leaflessTransmission };
   post(shadowWorker, m);
   post(simWorker, m);
@@ -220,9 +223,14 @@ function pushTrees(): void {
 
 shadowWorker.onmessage = (e) => {
   const m = e.data;
-  if (m.type !== 'shadow') return;
-  shadowBusy = false;
-  drawShadow(m.data as Float32Array);
+  if (m.type === 'day') {
+    shadowBusy = false;
+    dayCache = { key: m.key ?? dayRequestedKey, data: m.data as Float32Array, dayLength: m.dayLength as number };
+    drawDay();
+  } else if (m.type === 'shadow') {
+    shadowBusy = false;
+    if (shadowMode() === 'instant') drawShadow(m.data as Float32Array);
+  } else return;
   if (shadowPending) {
     shadowPending = false;
     requestShadow();
@@ -770,6 +778,16 @@ function updateTimeLabels(): void {
   $('hour-v').textContent = `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
   const s = t.sun;
   const hz = st.weather ? horizonAtUi(s.azimuth) : 0;
+  const mode = shadowMode();
+  ($('hour') as HTMLInputElement).disabled = mode !== 'instant';
+  if (mode !== 'instant') {
+    const ready = dayCache?.key === dayKey();
+    $('sun-v').innerHTML = !ready
+      ? '⏳ Calcul des heures de soleil sur la journée…'
+      : `${mode === 'allday' ? '<span class="sw-allday"></span> <b>Violet : à l\'ombre toute la journée</b>' : '<span class="sw-allday"></span> violet : aucun soleil direct · <span class="sw-day"></span> plus c\'est bleu, moins il y a de soleil · sans couleur : plein soleil'} le ${dayLabel(t.day)} (jour de ${hm(dayCache!.dayLength)}, plein soleil ici ≈ ${hm(maxSunHours(dayCache!.data, dayCache!.dayLength))} avec le relief).
+        ${hoverSun ? `<br>📍 Ici : <b>${hoverSun}</b> de soleil direct` : '<br>Survolez la carte pour lire les heures de soleil.'}`;
+    return;
+  }
   $('sun-v').textContent =
     s.elevation <= 0
       ? '🌙 Soleil couché'
@@ -785,6 +803,70 @@ function horizonAtUi(az: number): number {
   return h[i] + (h[(i + 1) % 360] - h[i]) * (a - i);
 }
 
+// ---------- Ombres sur la journée ----------
+
+let sceneVersion = 0;
+let dayCache: { key: string; data: Float32Array; dayLength: number } | null = null;
+let dayRequestedKey = '';
+const shadowMode = () => ($('shadow-mode') as HTMLSelectElement).value as 'instant' | 'day' | 'allday';
+const DAY_STEP_MIN = 10;
+const hm = (h: number) => {
+  const H = Math.floor(h + 1e-6);
+  const M = Math.round((h - H) * 60);
+  return M === 60 ? `${H + 1} h 00` : `${H} h ${String(M).padStart(2, '0')}`;
+};
+
+function dayKey(): string {
+  return `${currentTime().day}|${sceneVersion}`;
+}
+
+/** Heures de soleil d'une cellule dégagée (98e centile de la zone). */
+function maxSunHours(data: Float32Array, dayLength: number): number {
+  const sample: number[] = [];
+  for (let k = 0; k < data.length; k += 7) sample.push(data[k]);
+  sample.sort((x, y) => x - y);
+  return Math.max(0.25, Math.min(dayLength, sample[Math.floor(sample.length * 0.98)] ?? dayLength));
+}
+
+function drawDay(): void {
+  if (!shadowOverlay || !dayCache || shadowMode() === 'instant') return;
+  const { data, dayLength } = dayCache;
+  const c = shadowOverlay.canvas;
+  const ctx = c.getContext('2d')!;
+  const img = ctx.createImageData(c.width, c.height);
+  const all = shadowMode() === 'allday';
+  const hmax = maxSunHours(data, dayLength);
+  for (let k = 0; k < data.length; k++) {
+    const h = data[k];
+    if (h < 0.1) img.data.set([110, 0, 150, 175], k * 4); // jamais de soleil direct
+    else if (!all) {
+      // échelle relative au plein soleil de la zone (le relief lointain masque déjà le soleil bas)
+      const f = Math.max(0, 1 - h / hmax);
+      const a = Math.pow(f, 0.7) * 200;
+      if (a > 8) img.data.set([10, 30, 110, a], k * 4);
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  updateTimeLabels();
+}
+
+/** Valeur (heures de soleil) sous la souris, en mode journée. */
+let hoverSun: string | null = null;
+map.on('mousemove', (e: L.LeafletMouseEvent) => {
+  if (shadowMode() === 'instant' || !dayCache || !st.dsm) {
+    hoverSun = null;
+    return;
+  }
+  const g = st.dsm;
+  const win = shadowWindow();
+  const [x, y] = toL93(e.latlng.lat, e.latlng.lng);
+  const i = Math.floor((x - g.x0) / g.res) - win.i0;
+  const j = Math.floor((g.y0 - y) / g.res) - win.j0;
+  const prev = hoverSun;
+  hoverSun = i >= 0 && j >= 0 && i < win.w && j < win.h ? hm(dayCache.data[j * win.w + i]) : null;
+  if (hoverSun !== prev) updateTimeLabels();
+});
+
 function requestShadow(): void {
   updateTimeLabels();
   if (!st.dsm || !shadowOverlay) return;
@@ -794,6 +876,18 @@ function requestShadow(): void {
   }
   const t = currentTime();
   const win = shadowWindow();
+  if (shadowMode() !== 'instant') {
+    const key = dayKey();
+    if (dayCache?.key === key) {
+      drawDay();
+      return;
+    }
+    shadowBusy = true;
+    dayRequestedKey = key;
+    updateTimeLabels();
+    post(shadowWorker, { type: 'day', reqId: ++shadowReq, day: t.day, lat: st.lat, lon: st.lon, stepMin: DAY_STEP_MIN, ...win });
+    return;
+  }
   shadowBusy = true;
   post(shadowWorker, { type: 'shadow', reqId: ++shadowReq, az: t.sun.azimuth, el: t.sun.elevation, month: t.month, ...win });
 }
@@ -815,6 +909,10 @@ function drawShadow(data: Float32Array): void {
 }
 
 for (const id of ['day', 'hour']) $(id).addEventListener('input', requestShadow);
+$('shadow-mode').addEventListener('change', () => {
+  if (shadowMode() !== 'instant' && playTimer) $('play').click(); // l'animation n'a de sens qu'heure par heure
+  requestShadow();
+});
 document.querySelectorAll<HTMLButtonElement>('#timebar .presets button').forEach((b) =>
   b.addEventListener('click', () => {
     ($('day') as HTMLInputElement).value = b.dataset.day!;
@@ -823,6 +921,10 @@ document.querySelectorAll<HTMLButtonElement>('#timebar .presets button').forEach
 );
 let playTimer = 0;
 $('play').addEventListener('click', () => {
+  if (!playTimer && shadowMode() !== 'instant') {
+    ($('shadow-mode') as HTMLSelectElement).value = 'instant';
+    requestShadow();
+  }
   if (playTimer) {
     clearInterval(playTimer);
     playTimer = 0;

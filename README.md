@@ -4,7 +4,7 @@ Application web qui, à partir de la vue aérienne d'une maison en France :
 
 1. **trouve les pans de toit** (pente et orientation réelles) grâce au LiDAR HD de l'IGN ;
 2. **pose le maximum de panneaux** sur chaque pan (portrait, paysage ou mixte, au centimètre près) ;
-3. **repère les arbres et les bâtiments voisins** et **affiche leurs ombres** à n'importe quelle date et heure (curseurs + animation) ;
+3. **repère les arbres et les bâtiments voisins** et **affiche leurs ombres** à n'importe quelle date et heure (curseurs + animation), ou sur toute une journée : **heures de soleil direct** de chaque point, et **zones à l'ombre toute la journée** (lecture au survol) ;
 4. calcule, **pour chaque panneau, le % de soleil perdu à cause des ombres**, sur l'année, l'été (avril → septembre), l'hiver (octobre → mars), par trimestre ou par mois ;
 5. estime la **production en kWh** avec **micro-onduleurs** ou avec un **onduleur central (1 MPPT par pan)**.
 
@@ -65,6 +65,7 @@ Pour ajouter une zone : `python3 tools/fetch_pvgis.py <lat> <lon>` (les coordonn
 - **Arbres** : hauteur MNS − MNT hors bâtiments → sommets locaux → couronnes.
 - **Calepinage** : grille de 1 cm dans le plan du toit, marge aux bords, recul aux obstacles ; tous les décalages sont testés, en portrait, paysage et mixte, et le maximum de panneaux est retenu.
 - **Ombres** : lancer de rayons vers le soleil sur le modèle 3D (50 cm), pour 9 points par panneau et chaque heure de l'année type. Un arbre caduc sans feuilles laisse passer une part réglable du soleil. Le diffus est réduit selon la part de ciel masquée.
+- **Cartes d'ombre affichées** : algorithme de balayage (propagation de la « hauteur d'ombre » depuis le côté du soleil), une passe de la grille par position du soleil ; la carte de la journée cumule les positions toutes les 10 min (≈ 0,5 à 1 s).
 - **Rayonnement** : position du soleil NOAA, transposition Hay-Davies, albédo 0,2.
 - **% de soleil perdu** = 1 − rayonnement reçu / rayonnement sans aucun masque (arbres, bâtiments et relief lointain ; détail au survol).
 - **Électrique** : 3 sous-chaînes par panneau protégées par diodes bypass ; température des cellules (NOCT) ; micro-onduleurs = chaque panneau optimisé seul ; onduleur central = un MPPT par pan, panneaux du pan en série (un panneau ombré pénalise la chaîne).

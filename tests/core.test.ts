@@ -264,3 +264,54 @@ describe('tracé rectangle', async () => {
     expect(c[1]).toBeCloseTo(5, 9);
   });
 });
+
+describe('heures de soleil sur la journée', async () => {
+  const { daySunHours } = await import('../src/shading');
+  it('au pied nord d\'un mur de 10 m : aucun soleil le 21 décembre, plein soleil loin du mur', () => {
+    const w = 200, h = 200;
+    const dsm = new Float32Array(w * h).fill(100);
+    // mur est-ouest à y = 60 m (lignes 80-81)
+    for (let i = 0; i < w; i++) for (let j = 80; j < 82; j++) dsm[j * w + i] = 110;
+    const s = {
+      x0: 0, y0: 100, res: 0.5, w, h, dsm, maxZ: 110,
+      treeLabel: new Int32Array(w * h), deciduous: new Uint8Array(1), leafless: Array(12).fill(false),
+      leaflessTransmission: 0.5, northOffset: 0, horizon: new Float32Array(360),
+    };
+    const sun: { az: number; el: number }[] = [];
+    for (let t = 0.125; t < 24; t += 0.25) {
+      const p = sunPosition(Date.UTC(2025, 11, 21, 0, 0) + t * 3600e3, 43.45, 5.64);
+      if (p.elevation > 0) sun.push({ az: p.azimuth, el: p.elevation });
+    }
+    const hours = daySunHours(s, sun, 0.25, 11, 0, 0, w, h);
+    const at = (x: number, y: number) => hours[Math.floor(100 - y) / 0.5 * w + Math.floor(x / 0.5)];
+    expect(at(50, 63)).toBe(0); // 2 m au nord du mur
+    expect(at(50, 20)).toBeGreaterThan(8.5); // loin au sud : toute la journée (~9 h 15)
+  });
+});
+
+describe('carte d\'ombre par balayage', async () => {
+  const { shadowMap, rayTransmission } = await import('../src/shading');
+  it('concorde avec le lancer de rayons (> 97 % des cellules)', () => {
+    const w = 160, h = 160;
+    const dsm = new Float32Array(w * h).fill(100);
+    // quelques bâtiments et un "arbre"
+    for (const [i0, j0, bw, bh, z] of [[30, 40, 20, 14, 107], [90, 70, 16, 24, 112], [60, 110, 10, 10, 115]])
+      for (let j = j0; j < j0 + bh; j++) for (let i = i0; i < i0 + bw; i++) dsm[j * w + i] = z;
+    const s = {
+      x0: 0, y0: 80, res: 0.5, w, h, dsm, maxZ: 115,
+      treeLabel: new Int32Array(w * h), deciduous: new Uint8Array(1), leafless: Array(12).fill(false),
+      leaflessTransmission: 0.5, northOffset: -1.9, horizon: new Float32Array(360),
+    };
+    for (const [az, el] of [[135, 20], [180, 25], [230, 12], [95, 35], [300, 15]]) {
+      const m = shadowMap(s, az, el, 0, 0, 0, w, h);
+      let agree = 0;
+      for (let j = 0; j < h; j++)
+        for (let i = 0; i < w; i++) {
+          const x = (i + 0.5) * 0.5, y = 80 - (j + 0.5) * 0.5;
+          const r = rayTransmission(s, x, y, dsm[j * w + i] + 0.05, az, el, false, 0.6, 0.25);
+          if (r === m[j * w + i]) agree++;
+        }
+      expect(agree / (w * h)).toBeGreaterThan(0.97);
+    }
+  });
+});

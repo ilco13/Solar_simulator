@@ -177,3 +177,8 @@ tbody tr { cursor: default; }
 #shadow-mode { width: auto; padding: 2px 6px; font-size: 11.5px; margin-left: auto; }
 #timebar input[type='range']:disabled { opacity: 0.35; }
 .sw-day { display: inline-block; width: 26px; height: 10px; border-radius: 2px; background: linear-gradient(90deg, rgb(10 30 110 / 0.78), rgb(10 30 110 / 0)); vertical-align: -1px; border: 1px solid var(--border); }
+#shade-step { width: auto; padding: 2px 6px; font-size: 11.5px; }
+.shade-legend { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; }
+.shade-legend .chip { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.shade-legend .chip i { display: inline-block; width: 14px; height: 10px; border-radius: 2px; border: 1px solid var(--border); }
+.shade-legend .chip i.none { background: transparent; }

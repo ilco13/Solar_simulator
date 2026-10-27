@@ -780,12 +780,13 @@ function updateTimeLabels(): void {
   const hz = st.weather ? horizonAtUi(s.azimuth) : 0;
   const mode = shadowMode();
   ($('hour') as HTMLInputElement).disabled = mode !== 'instant';
+  $('shade-step').hidden = mode !== 'day';
   if (mode !== 'instant') {
     const ready = dayCache?.key === dayKey();
     $('sun-v').innerHTML = !ready
       ? '⏳ Calcul des heures de soleil sur la journée…'
-      : `${mode === 'allday' ? '<span class="sw-allday"></span> <b>Violet : à l\'ombre toute la journée</b>' : '<span class="sw-allday"></span> violet : aucun soleil direct · <span class="sw-day"></span> plus c\'est bleu, moins il y a de soleil · sans couleur : plein soleil'} le ${dayLabel(t.day)} (jour de ${hm(dayCache!.dayLength)}, plein soleil ici ≈ ${hm(maxSunHours(dayCache!.data, dayCache!.dayLength))} avec le relief).
-        ${hoverSun ? `<br>📍 Ici : <b>${hoverSun}</b> de soleil direct` : '<br>Survolez la carte pour lire les heures de soleil.'}`;
+      : `${mode === 'allday' ? '<span class="sw-allday"></span> <b>Violet : à l\'ombre toute la journée</b>' : shadeLegend()}<br>Le ${dayLabel(t.day)} : jour de ${hm(dayCache!.dayLength)}, plein soleil ici ≈ ${hm(maxSunHours(dayCache!.data, dayCache!.dayLength))} (relief compris = référence 0 % d'ombre).
+        ${hoverSun ? `<br>📍 Ici : ${hoverSun}` : '<br>Survolez la carte pour lire les heures de soleil.'}`;
     return;
   }
   $('sun-v').textContent =
@@ -820,6 +821,51 @@ function dayKey(): string {
   return `${currentTime().day}|${sceneVersion}`;
 }
 
+// ---------- Classes d'ombre ----------
+
+interface ShadeClass {
+  from: number; // % d'ombre (inclus)
+  to: number; // % d'ombre (exclu)
+  rgba: [number, number, number, number];
+  css: string;
+}
+
+/** Sous ce seuil, on considère le point en plein soleil (pas de couleur). */
+const FULL_SUN_SHADE = 5;
+
+/**
+ * Tranches de % d'ombre (pas réglable), dégradé séquentiel d'une seule teinte :
+ * bleu clair = un peu d'ombre, bleu nuit = presque toujours à l'ombre. 100 % = violet (à part).
+ */
+function shadeClasses(): ShadeClass[] {
+  const step = Number(($('shade-step') as HTMLSelectElement).value) || 20;
+  const light = [198, 219, 239];
+  const dark = [8, 38, 100];
+  const out: ShadeClass[] = [];
+  const n = Math.round(100 / step);
+  for (let i = 0; i < n; i++) {
+    const t = n === 1 ? 1 : i / (n - 1);
+    const rgb = light.map((v, k) => Math.round(v + (dark[k] - v) * t)) as [number, number, number];
+    const a = Math.round(120 + 90 * t);
+    out.push({ from: i === 0 ? FULL_SUN_SHADE : i * step, to: (i + 1) * step, rgba: [...rgb, a], css: `rgb(${rgb.join(' ')} / ${(a / 255).toFixed(2)})` });
+  }
+  return out;
+}
+
+function shadeClassOf(shade: number, classes: ShadeClass[]): ShadeClass | null {
+  const p = shade * 100;
+  if (p < FULL_SUN_SHADE) return null;
+  for (const c of classes) if (p < c.to) return c;
+  return classes[classes.length - 1];
+}
+
+function shadeLegend(): string {
+  const chips = shadeClasses()
+    .map((c) => `<span class="chip"><i style="background:${c.css}"></i>${c.from}–${c.to} %</span>`)
+    .join('');
+  return `<span class="shade-legend"><b>Ombre sur la journée :</b> <span class="chip"><i class="none"></i>&lt; ${FULL_SUN_SHADE} %</span>${chips}<span class="chip"><i style="background:rgb(110 0 150 / 0.69)"></i>100 %</span></span>`;
+}
+
 /** Heures de soleil d'une cellule dégagée (98e centile de la zone). */
 function maxSunHours(data: Float32Array, dayLength: number): number {
   const sample: number[] = [];
@@ -836,14 +882,14 @@ function drawDay(): void {
   const img = ctx.createImageData(c.width, c.height);
   const all = shadowMode() === 'allday';
   const hmax = maxSunHours(data, dayLength);
+  const classes = shadeClasses();
   for (let k = 0; k < data.length; k++) {
     const h = data[k];
     if (h < 0.1) img.data.set([110, 0, 150, 175], k * 4); // jamais de soleil direct
     else if (!all) {
-      // échelle relative au plein soleil de la zone (le relief lointain masque déjà le soleil bas)
-      const f = Math.max(0, 1 - h / hmax);
-      const a = Math.pow(f, 0.7) * 200;
-      if (a > 8) img.data.set([10, 30, 110, a], k * 4);
+      // % d'ombre relatif au plein soleil de la zone (le relief lointain masque déjà le soleil bas)
+      const c = shadeClassOf(1 - Math.min(1, h / hmax), classes);
+      if (c) img.data.set(c.rgba, k * 4);
     }
   }
   ctx.putImageData(img, 0, 0);
@@ -863,7 +909,12 @@ map.on('mousemove', (e: L.LeafletMouseEvent) => {
   const i = Math.floor((x - g.x0) / g.res) - win.i0;
   const j = Math.floor((g.y0 - y) / g.res) - win.j0;
   const prev = hoverSun;
-  hoverSun = i >= 0 && j >= 0 && i < win.w && j < win.h ? hm(dayCache.data[j * win.w + i]) : null;
+  if (i >= 0 && j >= 0 && i < win.w && j < win.h) {
+    const h = dayCache.data[j * win.w + i];
+    const hmax = maxSunHours(dayCache.data, dayCache.dayLength);
+    const shade = Math.round((1 - Math.min(1, h / hmax)) * 100);
+    hoverSun = `<b>${hm(h)}</b> de soleil direct · <b>${shade} % d'ombre</b> sur la journée`;
+  } else hoverSun = null;
   if (hoverSun !== prev) updateTimeLabels();
 });
 
@@ -909,6 +960,7 @@ function drawShadow(data: Float32Array): void {
 }
 
 for (const id of ['day', 'hour']) $(id).addEventListener('input', requestShadow);
+$('shade-step').addEventListener('change', () => drawDay());
 $('shadow-mode').addEventListener('change', () => {
   if (shadowMode() !== 'instant' && playTimer) $('play').click(); // l'animation n'a de sens qu'heure par heure
   requestShadow();

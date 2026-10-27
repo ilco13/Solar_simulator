@@ -4,7 +4,7 @@ Application web qui, à partir de la vue aérienne d'une maison en France :
 
 1. **trouve les pans de toit** (pente et orientation réelles) grâce au LiDAR HD de l'IGN ;
 2. **pose le maximum de panneaux** sur chaque pan (portrait, paysage ou mixte, au centimètre près) ;
-3. **repère les arbres et les bâtiments voisins** et **affiche leurs ombres** à n'importe quelle date et heure (curseurs + animation), ou sur toute une journée : **heures de soleil direct** de chaque point, et **zones à l'ombre toute la journée** (lecture au survol) ;
+3. **repère les arbres et les bâtiments voisins** et **affiche leurs ombres** à n'importe quelle date et heure (curseurs + animation), ou sur toute une journée : **% d'ombre par tranches** (10, 20 ou 25 %) par rapport au plein soleil du jour, et **zones à l'ombre toute la journée** (heures de soleil et % lus au survol) ;
 4. calcule, **pour chaque panneau, le % de soleil perdu à cause des ombres**, sur l'année, l'été (avril → septembre), l'hiver (octobre → mars), par trimestre ou par mois ;
 5. estime la **production en kWh** avec **micro-onduleurs** ou avec un **onduleur central (1 MPPT par pan)**.
 
